@@ -15,11 +15,11 @@ Inspired by the spirit of tools like Neofetch, Fetch Studio isn't just about dis
 
 ## Simplicity over complexity
 
-- one node one output node = something changed
-- Edit colors, text, and more in each node
-- Each info node you add is another piece added to the terminal
-- simple logo examples to start means you can have a custom look in 6 minutes
-- no complex wiring, each singular node has everything you need, add as many nodes to the output that you want
+- One node to output = instant change: Connect a node to see its effect right away.
+- Self-contained nodes: Edit text, colors, and options directly inside the node—no tangled wiring required.
+- Stackable info nodes: Every info node you add brings another piece of system info into your terminal.
+- 6-minute custom setups: Start with simple built-in logo examples and get a look that feels yours fast.
+- Add what you want: Build up your output at your own pace without fighting complex node graphs.
 
 ## Philosophy
 
