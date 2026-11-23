@@ -13,6 +13,14 @@ Fetch Studio brings visual tools to terminal customization, letting you design y
 
 Inspired by the spirit of tools like Neofetch, Fetch Studio isn't just about displaying system information. It's about making the terminal your own.
 
+## Simplicity over complexity
+
+- one node one output node = something changed
+- Edit colors, text, and more in each node
+- Each info node you add is another piece added to the terminal
+- simple logo examples to start means you can have a custom look in 6 minutes
+- no complex wiring, each singular node has everything you need, add as many nodes to the output that you want
+
 ## Philosophy
 
 Fetch Studio isn't just about displaying system information. It's about how you choose to display it.
