@@ -5,6 +5,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: write   # lets softprops/action-gh-release attach the AppImage to the release
+
 jobs:
   appimage:
     # ubuntu-22.04 ships glibc 2.35, satisfying the glibc 2.34+ requirement
