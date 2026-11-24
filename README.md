@@ -1,3 +1,7 @@
+<div align="center">
+<img width="259" height="258" alt="fetch-studio" src="https://github.com/user-attachments/assets/63d856ae-3821-467d-ac69-3565f11b20f2" />
+</div>
+
 # Fetch Studio
 
 **Design your terminal's system-info screen (neofetch / fastfetch style) by connecting boxes. No code, no config files.**
