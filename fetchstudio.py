@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QListWidget, QListWidgetItem, QButtonGroup)
 
 APP = "Fetch Studio"
-VERSION = "1.2.0"          # keep in sync with the GitHub release tag (v1.1.0 -> "1.1.0")
+VERSION = "1.1.0"          # keep in sync with the GitHub release tag (v1.1.0 -> "1.1.0")
 GH_REPO = "bobbycomet/Fetch-Studio"
 RELEASES_URL = "https://github.com/%s/releases" % GH_REPO
 UPDATER_URL = "https://github.com/bobbycomet/GriffinUpdater"
@@ -71,6 +71,7 @@ SPEC = {
     "logo": ("Logo", "#2980b9", [
         P("source", "Source", "combo", "auto", ["auto", "tux", "arch", "file"]),
         P("file", "Image / GIF / text file", "file", ""), P("width", "Image width (cols) — higher = sharper", "int", 72, (8, 200)),
+        P("quality", "Image detail: sharp = 2x2 quadrant blocks, standard = half-blocks", "combo", "sharp", ["sharp", "standard"], False, ("source", "file")),
         P("color", "Color", "color", "#3daee9"),
         P("gradient", "Gradient", "combo", "none", GRADS, True), P("color2", "Gradient color 2", "color", "#bb9af7", True),
         P("color3", "Gradient color 3", "color", "#f7768e", True),
@@ -333,16 +334,68 @@ def img2rows(img, w, bg="#1e1e1e"):
         rows.append(merge(row))
     return rows
 
-def image_frames(path, w, bg="#1e1e1e"):
-    key = (str(path), path.stat().st_mtime, w, bg)
+# Sharp mode: quadrant blocks. Every character cell = 2x2 pixels (twice the horizontal detail of half-blocks); the best
+# 2-colour split of those 4 pixels is chosen per cell. Bits: 1 = top-left, 2 = top-right, 4 = bottom-left, 8 = bottom-right.
+QUAD = {"▘": 1, "▝": 2, "▀": 3, "▖": 4, "▌": 5, "▞": 6, "▛": 7, "▗": 8, "▚": 9, "▐": 10, "▜": 11, "▄": 12, "▙": 13, "▟": 14, "█": 15}
+QCHAR = {v: k for k, v in QUAD.items()}; QCHAR[0] = " "
+PARTS = [(m, [i for i in range(4) if m >> i & 1], [i for i in range(4) if not m >> i & 1]) for m in range(1, 8)]
+def hexc(c): return "#%02x%02x%02x" % tuple(round(v) for v in c)
+
+def fit_cell(q):
+    """q = 4 pixels (TL, TR, BL, BR) as (r,g,b) or None (transparent) -> one character cell."""
+    vis = [i for i in range(4) if q[i]]
+    if not vis: return R(" ")
+    n = len(vis); S = [sum(q[i][k] for i in vis) for k in range(3)]; mean = [v / n for v in S]
+    if n < 4: return R(QCHAR[sum(1 << i for i in vis)], hexc(mean))          # transparent corner: draw only the visible part
+    if sum(v * v for i in vis for v in q[i]) - sum(v * v for v in S) / 4 < 40: return R("█", hexc(mean))   # flat area
+    best = None
+    for m, a, b in PARTS:
+        sa = [sum(q[i][k] for i in a) for k in range(3)]; sb = [S[k] - sa[k] for k in range(3)]
+        sc = sum(v * v for v in sa) / len(a) + sum(v * v for v in sb) / len(b)        # max of this == min squared error
+        if not best or sc > best[0]: best = (sc, m, sa, len(a), sb, len(b))
+    _, m, sa, na, sb, nb = best
+    return R(QCHAR[m], hexc([v / na for v in sa]), hexc([v / nb for v in sb]))
+
+def sharpen(px, W, h, k):
+    """Light unsharp mask (restores the crispness smooth downscaling takes away). Transparent pixels are ignored."""
+    out = [r[:] for r in px]
+    for y in range(h):
+        for x in range(W):
+            c = px[y][x]
+            if c is None: continue
+            n = [px[yy][xx] for xx, yy in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)) if 0 <= xx < W and 0 <= yy < h and px[yy][xx]]
+            if n: out[y][x] = tuple(min(255, max(0, c[i] + k * (c[i] - sum(v[i] for v in n) / len(n)))) for i in range(3))
+    return out
+
+def img2rows_quad(img, w, bg="#1e1e1e", sharp=0.5):
+    """Same cell grid / size as img2rows, but with 2x2 pixels per cell instead of 1x2."""
+    h = max(2, round(img.height() * w / img.width() / 2) * 2); W = 2 * w
+    s = downscale(img, W, h); st = s.bytesPerLine(); raw = bytes(s.constBits().asstring(s.sizeInBytes()))
+    b = QColor(bg); bgc = (b.red(), b.green(), b.blue()); px = []
+    for y in range(h):
+        row = []; o = y * st
+        for x in range(W):
+            bl, gr, rd, a = raw[o + 4 * x: o + 4 * x + 4]                       # ARGB32 = B,G,R,A bytes (not premultiplied)
+            if a < 10: row.append(None)
+            elif a > 250: row.append((rd, gr, bl))
+            else: f = a / 255; row.append((bgc[0] + (rd - bgc[0]) * f, bgc[1] + (gr - bgc[1]) * f, bgc[2] + (bl - bgc[2]) * f))
+        px.append(row)
+    if sharp: px = sharpen(px, W, h, sharp)
+    return [merge([fit_cell((px[2 * cy][2 * cx], px[2 * cy][2 * cx + 1], px[2 * cy + 1][2 * cx], px[2 * cy + 1][2 * cx + 1]))
+                   for cx in range(w)]) for cy in range(h // 2)]
+
+def image_frames(path, w, bg="#1e1e1e", sharp=True):
+    key = (str(path), path.stat().st_mtime, w, bg, sharp)
     if key in IMGCACHE: return IMGCACHE[key]
     imgs = []; mv = QMovie(str(path))
     if mv.isValid() and mv.frameCount() > 1:
-        first = mv.currentImage(); mv.jumpToFrame(0); first = mv.currentImage()
+        mv.jumpToFrame(0); first = mv.currentImage(); fc = mv.frameCount()
         cells = max(1, w * round(first.height() * w / max(1, first.width())) // 2)
-        for i in range(min(mv.frameCount(), max(2, min(24, 1_500_000 // (45 * cells))))): mv.jumpToFrame(i); imgs.append(mv.currentImage())
+        n = min(fc, max(2, min(24, 1_500_000 // ((60 if sharp else 45) * cells))))
+        for k in range(n): mv.jumpToFrame(k * fc // n); imgs.append(mv.currentImage())     # spread over the whole loop, not just the first frames
     else: imgs = [QImage(str(path))]
-    IMGCACHE[key] = [img2rows(i, w, bg) for i in imgs if not i.isNull() and i.width() > 0] or [[[R("(unreadable image)")]]]
+    conv = (lambda i: img2rows_quad(i, w, bg)) if sharp else (lambda i: img2rows(i, w, bg))
+    IMGCACHE[key] = [conv(i) for i in imgs if not i.isNull() and i.width() > 0] or [[[R("(unreadable image)")]]]
     return IMGCACHE[key]
 
 def lerp(c1, c2, t):
@@ -409,7 +462,7 @@ def logo_frames(g, n, O, classic):
             src = "arch" if re.search("arch|cachyos|manjaro|endeavour", ids) else "tux"
         if src == "file":
             path = g.asset(p["file"])
-            if path and path.exists() and path.suffix.lower() in IMG: return image_frames(path, int(p["width"]), O["bg"]), 0
+            if path and path.exists() and path.suffix.lower() in IMG: return image_frames(path, int(p["width"]), O["bg"], p["quality"] != "standard"), 0
             lines = path.read_text(errors="replace").splitlines() if path and path.exists() else ["(no file)"]
         else: lines = LOGOS.get(src, LOGOS["tux"])
         g_ = p["gradient"]; mode = "gradient" if g_ != "none" else "solid"; cells = None; direction = g_
@@ -634,9 +687,13 @@ class TermView(QWidget):
                 for c in t:
                     ix, iy = round(x), round(ty); iw, ih = round(x + cw) - ix, round(ty + ch) - iy; hm = round(ty + ch / 2) - iy
                     if bg: p.fillRect(QRect(ix, iy, iw, ih), s.col(bg))
-                    if c == "▀": p.fillRect(QRect(ix, iy, iw, hm), col)
-                    elif c == "▄": p.fillRect(QRect(ix, iy + hm, iw, ih - hm), col)
-                    elif c == "█": p.fillRect(QRect(ix, iy, iw, ih), col)
+                    q = QUAD.get(c)
+                    if q == 15: p.fillRect(QRect(ix, iy, iw, ih), col)
+                    elif q:                                              # half / quadrant blocks, drawn cell-exact
+                        hw = round(x + cw / 2) - ix
+                        for bit, rx, ry, rw, rh in ((1, ix, iy, hw, hm), (2, ix + hw, iy, iw - hw, hm),
+                                                    (4, ix, iy + hm, hw, ih - hm), (8, ix + hw, iy + hm, iw - hw, ih - hm)):
+                            if q & bit: p.fillRect(QRect(rx, ry, rw, rh), col)
                     elif c != " ": p.setPen(col); p.drawText(QPointF(x, ty + asc), c)
                     x += cw
         p.fillRect(QRectF(x, y0 + y * ch, cw, ch), QColor(s.fg))
@@ -910,7 +967,7 @@ class PropPanel(QScrollArea):
     def set(s, k, v):
         s.d["params"][k] = v
         if k == "theme" and v != "none": s.win.apply_theme(v); s.later_refresh()
-        if k == "field": s.later_refresh()          # show/hide Weather and Custom options
+        if k in ("field", "source"): s.later_refresh()          # show/hide Weather, Custom and image options
         s.win.node_changed(s.d)
     def pick_color(s, k, b):
         c = QColorDialog.getColor(QColor(s.d["params"][k]), s)
