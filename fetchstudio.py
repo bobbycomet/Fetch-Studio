@@ -54,9 +54,9 @@ SPEC = {
         P("gap", "Logo gap", "int", 3, (1, 12)), P("separator", "Separator (custom)", "text", ": "),
         P("bg", "Background", "color", "#1e1e1e"), P("fg", "Default text", "color", "#d0d0d0"),
         P("animation", "Default logo animation", "combo", "none", ANIMS, True),
-        P("fps", "Animation FPS", "int", 8, (1, 30), True),
+        P("fps", "Animation FPS", "int", 12, (1, 30), True),
         P("lifetime", "Lifetime: intro=plays at launch, live=until 1st command", "combo", "intro", ["intro", "live"], True),
-        P("loops", "Intro loops", "int", 2, (1, 6), True)]),
+        P("loops", "Intro loops (1 = play once)", "int", 1, (1, 6), True)]),
     "logo": ("Logo", "#2980b9", [
         P("source", "Source", "combo", "auto", ["auto", "tux", "arch", "file"]),
         P("file", "Image / GIF / text file", "file", ""), P("width", "Image width (cols) — higher = sharper", "int", 72, (8, 200)),
@@ -131,7 +131,19 @@ SH = {  # shell snippets: run for the live preview AND baked into the generated 
     "Shell": 'basename "$SHELL"',
     "DE": 'echo "${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-n/a}}"',
     "Session": 'echo "${XDG_SESSION_TYPE:-n/a}"',
-    "Terminal": r"""t=${TERM_PROGRAM:-$(ps -o comm= -p "$(ps -o ppid= -p $PPID 2>/dev/null|tr -d ' ')" 2>/dev/null)}; echo "${t:-$TERM}" """,
+    "Terminal": r"""t=${TERM_PROGRAM:-}; [ -z "$t" ] && [ -n "$KONSOLE_VERSION" ] && t=Konsole
+[ -z "$t" ] && [ -n "$KITTY_WINDOW_ID" ] && t=kitty
+[ -z "$t" ] && [ -n "$ALACRITTY_SOCKET" ] && t=Alacritty
+if [ -z "$t" ]; then p=$$; for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' '); { [ -z "$p" ] || [ "$p" -le 1 ]; } && break
+  case "$(cat /proc/$p/comm 2>/dev/null)" in
+    konsole) t=Konsole;; gnome-terminal*) t="GNOME Terminal";; kgx) t="GNOME Console";; xfce4-terminal) t="Xfce Terminal";;
+    mate-terminal) t="MATE Terminal";; qterminal) t=QTerminal;; lxterminal) t=LXTerminal;; tilix) t=Tilix;;
+    deepin-terminal) t="Deepin Terminal";; cosmic-term) t="COSMIC Terminal";; io.elementary.t*|pantheon-term*) t="Pantheon Terminal";;
+    alacritty) t=Alacritty;; kitty) t=kitty;; wezterm*) t=WezTerm;; foot) t=foot;; xterm) t=xterm;; urxvt*) t=urxvt;;
+    terminator) t=Terminator;; guake) t=Guake;; yakuake) t=Yakuake;; ptyxis) t=Ptyxis;; ghostty) t=Ghostty;; terminology) t=Terminology;;
+  esac; [ -n "$t" ] && break; done; fi
+echo "${t:-$TERM}" """,
     "CPU": r"""awk -F: '/model name/{gsub(/^ +/,"",$2);print $2;exit}' /proc/cpuinfo""",
     "GPU": r"""lspci 2>/dev/null | grep -iE 'vga|3d' | head -1 | cut -d: -f3 | sed 's/^ *//'""",
     "Memory": r"""free -m | awk '/Mem:/{printf "%dMiB / %dMiB", $3, $2}'""",
@@ -156,6 +168,7 @@ def clean_env():
     return e
 
 CACHE, PENDING, STATE = {}, set(), {"dirty": False}
+PREVIEW = {"terminal": None}
 def value(key, snip):
     """Real value from this machine (async, cached). Same snippet is baked into the build."""
     if key in CACHE: return CACHE[key]
@@ -206,6 +219,9 @@ class Graph:
         g = Graph(name); g.nodes = {n["id"]: n for n in d["nodes"]}
         g.edges = [tuple(e) for e in d["edges"]]; g.groups = d.get("groups", {}); g.meta.update(d.get("meta", {}))
         for n in g.nodes.values():
+            if n["type"] == "output" and not g.meta.get("anim_v2"):
+                if n["params"].get("loops") == 2 and n["params"].get("fps") == 8: n["params"]["loops"], n["params"]["fps"] = 1, 12
+                g.meta["anim_v2"] = True
             for pr in SPEC[n["type"]][2]: n["params"].setdefault(pr.key, copy.deepcopy(pr.default))
         return g
 
@@ -401,6 +417,7 @@ def resolve(runs, c):
             if k in c["bars"]:
                 br = c["bars"][k]; v = value(br["key"], c["funcs"][br["key"]]); n = (int(v) if v.isdigit() else 0) * br["w"] // 100
                 out += [R(br["fill"], br["colors"][i]) if i < n else R(br["empty"], br["ec"]) for i in range(br["w"])]
+            elif k == "Terminal" and PREVIEW["terminal"]: out.append((PREVIEW["terminal"], fg, bg, b))
             else: out.append((value(k, c["funcs"][k]), fg, bg, b))
             pos = m.end()
         if pos < len(t): out.append((t[pos:], fg, bg, b))
@@ -452,7 +469,7 @@ BAR_FN = r"""bar(){ local p=${1:-0} w=$2 fc=$3 ec=$4 col=$5; local -n C=$6; loca
   for ((i=0;i<w;i++)); do if ((i<n)); then s+="${C[i]}$fc"; else s+="$col$ec"; fi; done
   printf '%s\033[0m' "$s"; }"""
 
-TAIL = r"""NF=__NF__; FIN=__FIN__; MODE=__MODE__
+TAIL = r"""NF=__NF__; NI=__NI__; FIN=__FIN__; MODE=__MODE__
 H=${#INFO[@]}; ((${#FR0[@]}>H)) && H=${#FR0[@]}
 render(){ local -n F=$1; local i; for ((i=0;i<H;i++)); do printf '%s%s\033[0m\n' "${F[i]-$PAD}" "${INFO[i]-}"; done; }
 draw(){ local -n F=$1; local i o=$'\033'7
@@ -476,7 +493,7 @@ if ((NF>1)) && [ -t 1 ]; then
   if [ "$MODE" = live ]; then live
   else
     printf '\033[?25l'; trap 'printf "\033[?25h"' EXIT
-    for ((k=0;k<NF*__LOOPS__;k++)); do render FR$((k % NF)); sleep __DELAY__; printf '\033[%dA' "$H"; done
+    for ((k=0;k<NI*__LOOPS__;k++)); do render FR$((k % NI)); sleep __DELAY__; printf '\033[%dA' "$H"; done
     printf '\033[?25h'; render FR$FIN
   fi
 else render FR$FIN; fi"""
@@ -495,7 +512,7 @@ def gen_script(c):
         for row in fr: L.append("  " + "".join("$'%s'" % lit(r) for r in row) + "$'%s'" % (" " * (lw - rlen(row) + gap)))
         L.append(")")
     L.append("PAD=$'%s'" % (" " * (lw + gap)))
-    L.append(TAIL.replace("__NF__", str(len(frames))).replace("__FIN__", str(c["final"])).replace("__MODE__", O["lifetime"])
+    L.append(TAIL.replace("__NF__", str(len(frames))).replace("__FIN__", str(c["final"])).replace("__NI__", str(len(frames) - 8 if c["final"] else len(frames))).replace("__MODE__", O["lifetime"])
              .replace("__LOOPS__", str(int(O["loops"]))).replace("__DELAY__", "%.3f" % (1 / max(1, int(O["fps"])))))
     return "\n".join(L) + "\n"
 
@@ -1269,7 +1286,7 @@ class Main(QMainWindow):
         if s.comp and len(s.comp["frames"]) > 1: s.fi += 1; s.render()
         elif STATE["dirty"]: s.render()
     def render(s):
-        STATE["dirty"] = False; t = TERMS.get(s.g.meta.get("terminal"), TERMS["GNOME Terminal"])
+        STATE["dirty"] = False; PREVIEW["terminal"] = s.g.meta.get("terminal"); t = TERMS.get(s.g.meta.get("terminal"), TERMS["GNOME Terminal"])
         if not s.comp: s.term.set([], "#1e1e1e", "#d0d0d0", t[0], t[1]); return
         O = s.comp["O"]; s.term.set(compose(s.comp, s.fi), O["bg"], O["fg"], t[0], t[1])
     def import_asset(s, path):
