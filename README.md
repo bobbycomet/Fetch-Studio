@@ -10,6 +10,8 @@ Fetch Studio is a desktop app (PyQt6) where you build the look of your terminal 
 1:1 live terminal preview update as you go. When you press **Build**, it installs a small standalone script and hooks it into
 your shell. After that the app can be closed: every new terminal shows your design.
 
+Check the [WIKI](https://github.com/bobbycomet/Fetch-Studio/wiki/Controls) for controls and hotkeys
+
 ---
 
 ## Why it exists
