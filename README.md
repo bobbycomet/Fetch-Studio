@@ -31,6 +31,14 @@ fighting alignment by hand. Most people just want to say *"show my OS and RAM, p
 
 ---
 
+## How fast and acurrate is it? 
+
+- 1:1 what you see is what you get live preview
+- Once you set it up the way you want, build takes 5 seconds or less, once you hit build, it will be ready by the time you open your terminal
+- Terminal opens with the system info and artwork almost immediately
+
+---
+
 ## How the graph works (and how node position matters)
 
 Every design has one **Output** node. Everything you want on screen is a node connected to Output's input port:
