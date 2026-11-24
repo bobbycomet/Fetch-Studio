@@ -12,6 +12,8 @@ your shell. After that the app can be closed: every new terminal shows your desi
 
 Check the [WIKI](https://github.com/bobbycomet/Fetch-Studio/wiki/Home) for controls and hotkeys
 
+To update Fetch Studio, it was added to [Griffin Updater](https://github.com/bobbycomet/GriffinUpdater)'s app list.
+
 ---
 
 ## Why it exists
