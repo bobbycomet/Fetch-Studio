@@ -31,11 +31,18 @@ TERMS = {
 
 # ------------------------------------------------------------------ node specs
 class Par:
-    def __init__(s, key, label, kind, default, opts=None, fancy=False):
-        s.key, s.label, s.kind, s.default, s.opts, s.fancy = key, label, kind, default, opts, fancy
+    def __init__(s, key, label, kind, default, opts=None, fancy=False, when=None):
+        s.key, s.label, s.kind, s.default, s.opts, s.fancy, s.when = key, label, kind, default, opts, fancy, when
 P = Par
-FIELDS = ["OS", "Host", "Kernel", "Uptime", "Packages", "Shell", "DE", "Session", "Terminal", "CPU", "GPU",
-          "Memory", "Disk", "Swap", "Load", "Battery", "LocalIP", "Resolution", "Locale", "Custom"]
+FIELDS = ["OS", "Host", "Board", "BIOS", "Chassis", "Kernel", "Init", "Uptime", "Packages", "Shell", "DE", "Session", "Terminal",
+          "CPU", "CPUTemp", "GPU", "GPUTemp", "Fans", "SuperIO", "Memory", "Swap", "Disk", "Load", "Procs", "Battery",
+          "LocalIP", "Resolution", "Locale", "Weather", "Custom"]
+FIELD_LABELS = {"Board": "Motherboard", "BIOS": "BIOS", "Chassis": "Chassis (desktop/laptop)", "Init": "Init system", "CPUTemp": "CPU Temp",
+                "GPUTemp": "GPU Temp", "Fans": "Fan Speed (case fans)", "SuperIO": "Super I/O chip", "Procs": "Processes",
+                "LocalIP": "Local IP", "DE": "DE", "Weather": "Weather (needs internet)", "Custom": "Custom command"}
+SHORT_LABELS = {"Board": "Motherboard", "Chassis": "Chassis", "Init": "Init", "CPUTemp": "CPU Temp", "GPUTemp": "GPU Temp",
+                "Fans": "Fans", "SuperIO": "Super I/O", "Procs": "Processes", "LocalIP": "Local IP"}   # default on-screen label
+def san(t): return str(t).replace("{{", "{ {")        # user text can never inject internal {{tokens}}
 ANIMS = ["none", "rainbow", "scroll", "pulse", "wave", "typewriter", "sparkle", "scanline"]
 GRADS = ["none", "horizontal", "vertical", "diagonal", "radial"]
 METRICS = {"Memory": "PCT_Memory", "Disk": "PCT_Disk", "CPU load": "PCT_CPU", "Swap": "PCT_Swap", "Battery": "PCT_Battery"}
@@ -70,9 +77,12 @@ SPEC = {
         P("_edit", "Edit in ASCII Designer…", "action", "edit"), P("_export", "Export node (.fsnode)…", "action", "export")]),
     "title": ("Title", "#27ae60", [P("color", "Color", "color", "#3daee9"), P("underline", "Underline", "check", True)]),
     "info": ("Info", "#8e44ad", [
-        P("field", "Field", "combo", "OS", FIELDS), P("label", "Label (blank = field)", "text", ""),
-        P("key_color", "Label color", "color", "#3daee9"), P("val_color", "Value color", "color", "#d0d0d0"),
-        P("command", "Command (Custom field)", "text", "echo hello")]),
+        P("field", "Readout", "fieldlist", "OS", FIELDS), P("label", "Label (blank = default)", "text", ""),
+        P("override", "Show this text instead of the real value (display only; your system is NOT changed)", "text", ""),
+        P("location", "Weather location (blank = auto by IP)", "text", "", None, False, ("field", "Weather")),
+        P("units", "Weather units", "combo", "auto", ["auto", "metric", "imperial"], False, ("field", "Weather")),
+        P("command", "Command to run", "text", "echo hello", None, False, ("field", "Custom")),
+        P("key_color", "Label color", "color", "#3daee9"), P("val_color", "Value color", "color", "#d0d0d0")]),
     "bar": ("Meter bar", "#1abc9c", [
         P("metric", "Metric", "combo", "Memory", list(METRICS)), P("label", "Label (blank = metric)", "text", ""),
         P("width", "Bar width", "int", 16, (6, 40)), P("style", "Style", "combo", "blocks", list(BARCH)),
@@ -84,7 +94,8 @@ SPEC = {
         P("color", "Color", "color", "#3daee9"), P("color2", "End color", "color", "#bb9af7"),
         P("gradient", "Gradient", "check", True)]),
     "colors": ("Color bar", "#d35400", [P("rows", "Rows", "combo", "2", ["1", "2"])]),
-    "text": ("Text", "#7f8c8d", [P("text", "Text", "text", "Hello"), P("color", "Color", "color", "#d0d0d0")]),
+    "text": ("Custom String", "#7f8c8d", [P("text", "Text — {OS} {Kernel} {CPUTemp} {Weather}… insert live values", "text", "Hello"),
+                                        P("color", "Color", "color", "#d0d0d0"), P("bold", "Bold", "check", False)]),
 }
 STYLE = """
 QMainWindow, QWidget { background:#171d25; color:#c7d5e0; font-size:13px; }
@@ -154,11 +165,37 @@ echo "${t:-$TERM}" """,
     "Load": "cut -d' ' -f1-3 /proc/loadavg",
     "Battery": r"""r=n/a; for b in /sys/class/power_supply/BAT*; do [ -r "$b/capacity" ] && { r="$(cat "$b/capacity")% $(cat "$b/status")"; break; }; done; echo "$r" """,
     "LocalIP": r"""x=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}'); echo "${x:-$(hostname -I 2>/dev/null | awk '{print $1}')}" """,
+    "CPUTemp": r"""t=""; for z in /sys/class/hwmon/hwmon*; do case "$(cat "$z/name" 2>/dev/null)" in coretemp|k10temp|zenpower|cpu_thermal|cpu-thermal) t=$(cat "$z/temp1_input" 2>/dev/null); break;; esac; done
+[ -z "$t" ] && t=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+[ -n "$t" ] && awk -v t="$t" 'BEGIN{printf "%.0f°C", t/1000}' || echo n/a""",
+    "GPUTemp": r"""r=""; if command -v nvidia-smi >/dev/null 2>&1; then t=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null | head -1); [ -n "$t" ] && r="${t}°C"; fi
+if [ -z "$r" ]; then for z in /sys/class/hwmon/hwmon*; do case "$(cat "$z/name" 2>/dev/null)" in amdgpu|nouveau|radeon) t=$(cat "$z/temp1_input" 2>/dev/null); [ -n "$t" ] && r=$(awk -v t="$t" 'BEGIN{printf "%.0f°C", t/1000}'); break;; esac; done; fi
+echo "${r:-n/a}" """,
+    "BIOS": r"""d=/sys/class/dmi/id; v="$(cat $d/bios_vendor 2>/dev/null) $(cat $d/bios_version 2>/dev/null)"; y=$(cat $d/bios_date 2>/dev/null); v=$(echo $v); echo "${v:-n/a}${y:+ ($y)}" """,
+    "Board": r"""d=/sys/class/dmi/id; v=$(echo $(cat $d/board_vendor 2>/dev/null) $(cat $d/board_name 2>/dev/null)); echo "${v:-n/a}" """,
+    "SuperIO": r"""r=""; for z in /sys/class/hwmon/hwmon*; do n=$(cat "$z/name" 2>/dev/null); case "$n" in nct*|it8*|w836*|w837*|f718*|f81*|sch5*|smsc*|dme1737|pc87*|vt1211|lm78|lm80|lm85|adt7*|max6*) r=$n; break;; esac; done; echo "${r:-n/a (driver not loaded)}" """,
+    "Fans": r"""r=""; c=0; for f in /sys/class/hwmon/hwmon*/fan*_input; do [ -r "$f" ] || continue; v=$(cat "$f" 2>/dev/null); if [ "${v:-0}" -gt 0 ] 2>/dev/null && [ $c -lt 4 ]; then r="$r${r:+, }$v RPM"; c=$((c+1)); fi; done; echo "${r:-n/a}" """,
+    "Chassis": r"""c=$(cat /sys/class/dmi/id/chassis_type 2>/dev/null); case "$c" in 8|9|10|14) r=Laptop;; 11) r=Handheld;; 30|31|32) r="Tablet / 2-in-1";; 3|4|5|6|7|15|16) r=Desktop;; 13) r="All-in-One";; 17|23|24|25|28) r=Server;; 35|36) r="Mini PC";; *) r="";; esac
+[ -z "$r" ] && { ls /sys/class/power_supply/BAT* >/dev/null 2>&1 && r=Laptop || r=Desktop; }; echo "$r" """,
+    "Init": r"""c=$(ps -p 1 -o comm= 2>/dev/null | tr -d ' '); [ -z "$c" ] && c=$(cat /proc/1/comm 2>/dev/null)
+if [ "$c" = init ] || [ -z "$c" ]; then if [ -d /run/openrc ]; then c=OpenRC; elif [ -d /run/runit ] || [ -d /etc/runit ]; then c=runit; else c=SysVinit; fi; fi; echo "$c" """,
+    "Procs": "ps -e -o pid= | wc -l | tr -d ' '",
     "PCT_Memory": r"""free | awk '/Mem:/{printf "%d",$3*100/$2}'""",
     "PCT_Disk": r"""df / | awk 'NR==2{gsub("%","",$5);print $5}'""",
     "PCT_CPU": r"""awk -v n="$(nproc)" '{p=$1*100/n; if(p>100)p=100; printf "%d",p}' /proc/loadavg""",
     "PCT_Swap": r"""free | awk '/Swap:/{if($2>0)printf "%d",$3*100/$2; else print 0}'""",
     "PCT_Battery": r"""for b in /sys/class/power_supply/BAT*; do [ -r "$b/capacity" ] && { cat "$b/capacity"; break; }; done"""}
+
+def weather_snippet(loc, units):
+    """wttr.in lookup, cached 30 min so terminals never wait on the network (first run waits <=3 s once)."""
+    import hashlib; from urllib.parse import quote
+    q = quote(loc.strip()); u = {"metric": "&m", "imperial": "&u"}.get(units, "")
+    h = hashlib.md5((loc + units).encode()).hexdigest()[:8]
+    return ('f="${XDG_CACHE_HOME:-$HOME/.cache}/fetchstudio/weather_%s"; mkdir -p "${f%%/*}" 2>/dev/null\n'
+            'fetch(){ curl -fsS -m 3 "https://wttr.in/%s?format=%%C+%%t%s" 2>/dev/null | head -c 80; }\n'
+            'if [ ! -s "$f" ]; then r=$(fetch); [ -n "$r" ] && printf \'%%s\' "$r" > "$f"\n'
+            'elif [ -n "$(find "$f" -mmin +30 2>/dev/null)" ]; then ( r=$(fetch); [ -n "$r" ] && printf \'%%s\' "$r" > "$f" ) >/dev/null 2>&1 & fi\n'
+            'cat "$f" 2>/dev/null || echo n/a') % (h, q, u)
 
 # ------------------------------------------------------------------ system helpers
 def clean_env():
@@ -384,25 +421,37 @@ def compile_graph(g):
                 funcs["TitleU"] = 'u=$(%s); printf -v s "%%*s" "${#u}" ""; echo "${s// /%s}"' % (SH["Title"], "─" if adv else "-")
                 rows.append([R("{{TitleU}}", O["fg"])])
         elif t == "info":
-            f = p["field"]
-            if f == "Custom": key = "c%d" % abs(hash(p["command"])); funcs[key] = p["command"]
-            else: key = f; funcs[key] = SH[f]
-            rows.append(([R("◆ ", p["key_color"])] if adv else []) +
-                        [R(p["label"] or f, p["key_color"], None, True), R(sep, O["fg"]), R("{{%s}}" % key, p["val_color"])])
+            f = p["field"]; ov = san(p.get("override") or "")
+            if ov: val = R(ov, p["val_color"])                       # display-only name; nothing on the system is touched
+            else:
+                if f == "Custom": key = "c%d" % abs(hash(p["command"])); funcs[key] = p["command"]
+                elif f == "Weather": key = "w%d" % abs(hash((p["location"], p["units"]))); funcs[key] = weather_snippet(p["location"], p["units"])
+                else: key = f; funcs[key] = SH[f]
+                val = R("{{%s}}" % key, p["val_color"])
+            lab = san(p["label"] or SHORT_LABELS.get(f, f))
+            rows.append(([R("◆ ", p["key_color"])] if adv else []) + [R(lab, p["key_color"], None, True), R(sep, O["fg"]), val])
         elif t == "bar":
             key = METRICS[p["metric"]]; funcs[key] = SH[key]; fc, ec = BARCH[p["style"]]; w = int(p["width"]); bn = "BAR%d" % len(bars)
             bars[bn] = dict(key=key, w=w, fill=fc, empty=ec, ec=p["empty"],
                             colors=[grad([p["c1"], p["c2"], p["c3"]], i / max(1, w - 1)) for i in range(w)])
-            rows.append([R(p["label"] or p["metric"], p["key_color"], None, True), R(sep, O["fg"]),
+            rows.append([R(san(p["label"] or p["metric"]), p["key_color"], None, True), R(sep, O["fg"]),
                          R("{{%s}}" % bn), R(" {{%s}}%%" % key, O["fg"])])
         elif t == "divider":
-            w = int(p["width"]); s_ = ((p["char"] or "─")[0]) * w; lab = p["label"]
+            w = int(p["width"]); s_ = ((p["char"] or "─")[0]) * w; lab = san(p["label"])
             if lab: lab = " " + lab[: w - 4] + " "; i0 = (w - len(lab)) // 2; s_ = s_[:i0] + lab + s_[i0 + len(lab):]
             rows.append(merge([R(c, grad([p["color"], p["color2"]], i / max(1, w - 1)) if p["gradient"] else p["color"]) for i, c in enumerate(s_)]))
         elif t == "colors":
             rows.append([])
             for r in range(int(p["rows"])): rows.append([R("   ", None, "a%d" % (i + 8 * r)) for i in range(8)])
-        elif t == "text": rows.append([R(p["text"], p["color"])])
+        elif t == "text":
+            txt = san(p["text"]); row = []; pos = 0; ph = {k.lower(): k for k in list(SH) if not k.startswith("PCT_") and k != "TitleU"}
+            for m in re.finditer(r"\{(\w+)\}", txt):
+                k = ph.get(m[1].lower())
+                if not k: continue
+                if m.start() > pos: row.append(R(txt[pos:m.start()], p["color"], None, p["bold"]))
+                funcs[k] = SH[k]; row.append(R("{{%s}}" % k, p["color"], None, p["bold"])); pos = m.end()
+            if pos < len(txt): row.append(R(txt[pos:], p["color"], None, p["bold"]))
+            rows.append(row or [R("")])
     frames, final = logo_frames(g, logo, O, classic) if logo else ([[]], 0)
     return dict(O=O, frames=frames, final=final, rows=rows, funcs=funcs, bars=bars, classic=classic)
 
@@ -502,7 +551,7 @@ def gen_script(c):
     O = c["O"]; frames = c["frames"]
     L = ["#!/usr/bin/env bash", "# Generated by Fetch Studio. Standalone - the app does not need to be running.",
          ". /etc/os-release 2>/dev/null", BAR_FN]
-    for k, sn in c["funcs"].items(): L.append("f_%s(){\n%s\n}" % (k, sn))
+    for k, sn in c["funcs"].items(): L.append("f_%s(){ local v; v=$(\n%s\n); echo \"${v:-n/a}\"; }" % (k, sn))   # empty result -> n/a (same as preview)
     for bn, b in c["bars"].items(): L.append("BARC_%s=(%s)" % (bn, " ".join("$'%s'" % sgr(col, None, False) for col in b["colors"])))
     L.append("INFO=()")
     for row in c["rows"]: L.append("INFO+=(%s)" % (info_expr(row, c["bars"]) or '""'))
@@ -598,7 +647,7 @@ class NodeItem(QGraphicsItem):
     def boundingRect(s): return QRectF(-8, -8, s.W + 16, s.H + 16)
     def summary(s):
         p, t = s.d["params"], s.d["type"]
-        v = {"info": p.get("label") or p.get("field"), "logo": p.get("source"), "title": "user@host",
+        v = {"info": p.get("label") or FIELD_LABELS.get(p.get("field"), p.get("field")), "logo": p.get("source"), "title": "user@host",
              "output": f'{p.get("preset")} / {p.get("animation")}', "text": p.get("text"),
              "colors": f'{p.get("rows")} row(s)', "clogo": (p.get("data") or {}).get("name"),
              "bar": p.get("metric"), "divider": p.get("label") or "divider"}.get(t, "")
@@ -802,14 +851,17 @@ class GraphView(QGraphicsView):
 
 # ------------------------------------------------------------------ properties panel
 class PropPanel(QScrollArea):
-    def __init__(s, win): super().__init__(); s.win = win; s.d = None; s.setWidgetResizable(True); s.show_node(None)
+    def __init__(s, win):
+        super().__init__(); s.win = win; s.d = None; s.setWidgetResizable(True)
+        s.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); s.show_node(None)
     def later_refresh(s): QTimer.singleShot(0, lambda: s.show_node(s.d if s.d and s.d["id"] in s.win.g.nodes else None))
     def show_node(s, d):
-        s.d = d; w = QWidget(); f = QFormLayout(w)
+        s.d = d; w = QWidget(); f = QFormLayout(w); f.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         if not d: f.addRow(QLabel("Select a node to edit its properties.")); s.setWidget(w); return
         f.addRow(hdr(SPEC[d["type"]][0]))
         for par in SPEC[d["type"]][2]:
             if par.kind == "hidden" or (s.win.classic and par.fancy): continue
+            if par.when and d["params"].get(par.when[0]) != par.when[1]: continue
             key, v = par.key, d["params"][par.key]
             if par.kind == "combo":
                 x = QComboBox(); x.addItems(par.opts); x.setCurrentText(str(v)); x.currentTextChanged.connect(lambda t, k=key: s.set(k, t))
@@ -821,18 +873,28 @@ class PropPanel(QScrollArea):
                 x = QLineEdit(str(v)); x.textChanged.connect(lambda t, k=key: s.set(k, t))
             elif par.kind == "color":
                 x = QPushButton(v); s.paint_btn(x, v); x.clicked.connect(lambda _, k=key, b=x: s.pick_color(k, b))
+            elif par.kind == "fieldlist":
+                x = QWidget(); xv = QVBoxLayout(x); xv.setContentsMargins(0, 0, 0, 0)
+                flt = QLineEdit(); flt.setPlaceholderText("Search readouts…"); lst = QListWidget(); lst.setFixedHeight(170)
+                for k in par.opts:
+                    it = QListWidgetItem(FIELD_LABELS.get(k, k)); it.setData(Qt.ItemDataRole.UserRole, k); lst.addItem(it)
+                    if k == v: lst.setCurrentItem(it); lst.scrollToItem(it)
+                lst.currentItemChanged.connect(lambda it, _, k=key: it and s.set(k, it.data(Qt.ItemDataRole.UserRole)))
+                flt.textChanged.connect(lambda t, l=lst: [l.item(i).setHidden(t.lower() not in l.item(i).text().lower()) for i in range(l.count())])
+                xv.addWidget(flt); xv.addWidget(lst)
             elif par.kind == "action":
                 b = QPushButton(par.label); b.clicked.connect(lambda _, a=par.default: s.win.edit_in_designer(s.d) if a == "edit" else s.win.export_node(s.d))
                 f.addRow(b); continue
             else:
                 x = QPushButton(v or "Choose file…"); x.clicked.connect(lambda _: s.pick_file())
-            f.addRow(par.label, x)
+            lb = QLabel(par.label); lb.setWordWrap(True); f.addRow(lb, x)
         s.setWidget(w)
     def paint_btn(s, b, c):
         q = QColor(c); b.setStyleSheet("background:%s;color:%s" % (c, "#000" if q.lightness() > 128 else "#fff"))
     def set(s, k, v):
         s.d["params"][k] = v
         if k == "theme" and v != "none": s.win.apply_theme(v); s.later_refresh()
+        if k == "field": s.later_refresh()          # show/hide Weather and Custom options
         s.win.node_changed(s.d)
     def pick_color(s, k, b):
         c = QColorDialog.getColor(QColor(s.d["params"][k]), s)
