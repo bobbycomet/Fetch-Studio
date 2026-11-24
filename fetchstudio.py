@@ -13,6 +13,10 @@ from PyQt6.QtWidgets import (
     QTabWidget, QListWidget, QListWidgetItem, QButtonGroup)
 
 APP = "Fetch Studio"
+VERSION = "1.2.0"          # keep in sync with the GitHub release tag (v1.1.0 -> "1.1.0")
+GH_REPO = "bobbycomet/Fetch-Studio"
+RELEASES_URL = "https://github.com/%s/releases" % GH_REPO
+UPDATER_URL = "https://github.com/bobbycomet/GriffinUpdater"
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "fetchstudio"
 PROJ, ACTIVE = DATA / "projects", DATA / "active"
 MARK_B, MARK_E = "# >>> fetchstudio >>>", "# <<< fetchstudio <<<"
@@ -203,6 +207,18 @@ def clean_env():
     if "LD_LIBRARY_PATH_ORIG" in e: e["LD_LIBRARY_PATH"] = e.pop("LD_LIBRARY_PATH_ORIG")
     else: e.pop("LD_LIBRARY_PATH", None)
     return e
+
+def vtuple(v):
+    """'v1.2.3' / '1.2.3-beta' -> (1, 2, 3) for comparison."""
+    return tuple(int(x) for x in re.findall(r"\d+", str(v).split("-")[0])[:4]) or (0,)
+
+def fetch_latest_release():
+    """Latest published (non-draft, non-prerelease) GitHub release -> (tag, page url)."""
+    import urllib.request
+    req = urllib.request.Request("https://api.github.com/repos/%s/releases/latest" % GH_REPO,
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "FetchStudio/" + VERSION})
+    with urllib.request.urlopen(req, timeout=8) as r: d = json.load(r)
+    return str(d.get("tag_name", "")), str(d.get("html_url") or RELEASES_URL)
 
 CACHE, PENDING, STATE = {}, set(), {"dirty": False}
 PREVIEW = {"terminal": None}
@@ -1294,6 +1310,7 @@ class Lesson(QWidget):
 # ------------------------------------------------------------------ main window
 def clean_name(n): return re.sub(r"[^\w.-]+", "_", n.strip()) or "project"
 class Main(QMainWindow):
+    update_result = pyqtSignal(str, str, bool, str)      # tag, url, manual check?, error
     def __init__(s):
         super().__init__(); s.cfg = QSettings("GriffinLinux", "FetchStudio"); s.g = None; s.dirty = False
         s.comp = None; s.fi = 0; s.flags = dict(saved=0, exported=False, built=False, panned=False, design_saved=False)
@@ -1307,7 +1324,8 @@ class Main(QMainWindow):
         s.tb = QToolBar(); s.tb.setMovable(False); s.addToolBar(s.tb); s.acts = {}
         for name, key, fn in (("New", "Ctrl+N", s.new_project), ("Open", "Ctrl+O", s.open_project), ("Save", "Ctrl+S", lambda: s.save()),
                               ("Import", "Ctrl+I", s.import_zip), ("Export", "Ctrl+E", s.export_zip), ("Build", "Ctrl+B", s.build),
-                              ("Remove", "", s.remove_build), ("Lesson", "F1", lambda: s.lesson.start())):
+                              ("Remove", "", s.remove_build), ("Updates", "", lambda: s.check_updates(True)),
+                              ("Lesson", "F1", lambda: s.lesson.start())):
             a = QAction(name, s); a.triggered.connect(fn)
             if key: a.setShortcut(QKeySequence(key))
             s.tb.addAction(a); s.acts[name] = a
@@ -1322,6 +1340,28 @@ class Main(QMainWindow):
         if last and (PROJ / last / "project.json").exists(): s.open_graph(s.read(last))
         else: s.open_graph(default_graph("my-first-fetch", "custom")); s.save()
         if not s.cfg.value("lesson/done", False, type=bool): QTimer.singleShot(500, lambda: s.lesson.start())
+        s.update_result.connect(s.on_update_result); QTimer.singleShot(3000, lambda: s.check_updates(False))
+    # update checker (GitHub releases)
+    def check_updates(s, manual=False):
+        def run():
+            try: tag, url = fetch_latest_release(); s.update_result.emit(tag, url, manual, "")
+            except Exception as ex: s.update_result.emit("", "", manual, str(ex))
+        threading.Thread(target=run, daemon=True).start()
+    def on_update_result(s, tag, url, manual, err):
+        if err or not tag:
+            if manual: QMessageBox.warning(s, APP, "Could not check for updates:\n%s" % (err or "no release found"))
+            return                                                  # silent on startup (offline, rate limit, ...)
+        if vtuple(tag) > vtuple(VERSION):
+            m = QMessageBox(s); m.setWindowTitle(APP + " update"); m.setIcon(QMessageBox.Icon.Information)
+            m.setTextFormat(Qt.TextFormat.RichText); m.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            m.setText("<b>Fetch Studio %s is available</b> (you have %s).<br><br>"
+                      "<b>Recommended:</b> use <a href=\"%s\">Griffin Updater</a> to update Fetch Studio. "
+                      "It keeps Fetch Studio up to date even when Fetch Studio is closed.<br><br>"
+                      "Or update manually by replacing the AppImage from the "
+                      "<a href=\"%s\">releases page</a>." % (tag.lstrip("vV"), VERSION, UPDATER_URL, url))
+            m.exec()
+        elif manual:
+            QMessageBox.information(s, APP, "You are up to date (version %s)." % VERSION)
     # helpers
     classic = property(lambda s: bool(s.g and s.g.meta.get("classic")))
     def bar(s, n): return s.tb.widgetForAction(s.acts[n])
