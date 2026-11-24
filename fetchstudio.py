@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Fetch Studio - node-based neofetch/fastfetch designer with a 1:1 terminal preview (PyQt6)."""
-import sys, os, re, json, shutil, zipfile, platform, subprocess, threading, uuid, copy, random, math
+import sys, os, re, json, shutil, zipfile, platform, subprocess, threading, uuid, copy, random, math, base64, shlex
 from pathlib import Path
-from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, QRect, QSize, QSettings, QMimeData, pyqtSignal
-from PyQt6.QtGui import (QAction, QColor, QFont, QFontMetricsF, QImage, QKeySequence,
+from PyQt6.QtCore import (Qt, QTimer, QPointF, QRectF, QRect, QSize, QSettings, QMimeData, pyqtSignal,
+                          QBuffer, QByteArray, QIODevice)
+from PyQt6.QtGui import (QAction, QColor, QFont, QFontMetricsF, QImage, QImageReader, QKeySequence,
                          QMovie, QPainter, QPainterPath, QPen)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QGraphicsView, QGraphicsScene, QGraphicsItem,
@@ -13,7 +14,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QListWidget, QListWidgetItem, QButtonGroup)
 
 APP = "Fetch Studio"
-VERSION = "1.2.0"          # keep in sync with the GitHub release tag (v1.1.0 -> "1.1.0")
+VERSION = "1.3.0"          # keep in sync with the GitHub release tag (v1.3.0 -> "1.3.0")
 GH_REPO = "bobbycomet/Fetch-Studio"
 RELEASES_URL = "https://github.com/%s/releases" % GH_REPO
 UPDATER_URL = "https://github.com/bobbycomet/GriffinUpdater"
@@ -71,6 +72,8 @@ SPEC = {
     "logo": ("Logo", "#2980b9", [
         P("source", "Source", "combo", "auto", ["auto", "tux", "arch", "file"]),
         P("file", "Image / GIF / text file", "file", ""), P("width", "Image width (cols) — higher = sharper", "int", 72, (8, 200)),
+        P("mode", "Image mode: auto = real graphics (kitty / iTerm2 / sixel) where the terminal supports them, else sharp blocks", "combo", "auto",
+          ["auto", "kitty", "iterm", "sixel", "blocks", "blocks-basic"], False, ("source", "file")),
         P("color", "Color", "color", "#3daee9"),
         P("gradient", "Gradient", "combo", "none", GRADS, True), P("color2", "Gradient color 2", "color", "#bb9af7", True),
         P("color3", "Gradient color 3", "color", "#f7768e", True),
@@ -333,16 +336,68 @@ def img2rows(img, w, bg="#1e1e1e"):
         rows.append(merge(row))
     return rows
 
-def image_frames(path, w, bg="#1e1e1e"):
-    key = (str(path), path.stat().st_mtime, w, bg)
+# Sharp mode: quadrant blocks. Every character cell = 2x2 pixels (twice the horizontal detail of half-blocks); the best
+# 2-colour split of those 4 pixels is chosen per cell. Bits: 1 = top-left, 2 = top-right, 4 = bottom-left, 8 = bottom-right.
+QUAD = {"▘": 1, "▝": 2, "▀": 3, "▖": 4, "▌": 5, "▞": 6, "▛": 7, "▗": 8, "▚": 9, "▐": 10, "▜": 11, "▄": 12, "▙": 13, "▟": 14, "█": 15}
+QCHAR = {v: k for k, v in QUAD.items()}; QCHAR[0] = " "
+PARTS = [(m, [i for i in range(4) if m >> i & 1], [i for i in range(4) if not m >> i & 1]) for m in range(1, 8)]
+def hexc(c): return "#%02x%02x%02x" % tuple(round(v) for v in c)
+
+def fit_cell(q):
+    """q = 4 pixels (TL, TR, BL, BR) as (r,g,b) or None (transparent) -> one character cell."""
+    vis = [i for i in range(4) if q[i]]
+    if not vis: return R(" ")
+    n = len(vis); S = [sum(q[i][k] for i in vis) for k in range(3)]; mean = [v / n for v in S]
+    if n < 4: return R(QCHAR[sum(1 << i for i in vis)], hexc(mean))          # transparent corner: draw only the visible part
+    if sum(v * v for i in vis for v in q[i]) - sum(v * v for v in S) / 4 < 40: return R("█", hexc(mean))   # flat area
+    best = None
+    for m, a, b in PARTS:
+        sa = [sum(q[i][k] for i in a) for k in range(3)]; sb = [S[k] - sa[k] for k in range(3)]
+        sc = sum(v * v for v in sa) / len(a) + sum(v * v for v in sb) / len(b)        # max of this == min squared error
+        if not best or sc > best[0]: best = (sc, m, sa, len(a), sb, len(b))
+    _, m, sa, na, sb, nb = best
+    return R(QCHAR[m], hexc([v / na for v in sa]), hexc([v / nb for v in sb]))
+
+def sharpen(px, W, h, k):
+    """Light unsharp mask (restores the crispness smooth downscaling takes away). Transparent pixels are ignored."""
+    out = [r[:] for r in px]
+    for y in range(h):
+        for x in range(W):
+            c = px[y][x]
+            if c is None: continue
+            n = [px[yy][xx] for xx, yy in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)) if 0 <= xx < W and 0 <= yy < h and px[yy][xx]]
+            if n: out[y][x] = tuple(min(255, max(0, c[i] + k * (c[i] - sum(v[i] for v in n) / len(n)))) for i in range(3))
+    return out
+
+def img2rows_quad(img, w, bg="#1e1e1e", sharp=0.5):
+    """Same cell grid / size as img2rows, but with 2x2 pixels per cell instead of 1x2."""
+    h = max(2, round(img.height() * w / img.width() / 2) * 2); W = 2 * w
+    s = downscale(img, W, h); st = s.bytesPerLine(); raw = bytes(s.constBits().asstring(s.sizeInBytes()))
+    b = QColor(bg); bgc = (b.red(), b.green(), b.blue()); px = []
+    for y in range(h):
+        row = []; o = y * st
+        for x in range(W):
+            bl, gr, rd, a = raw[o + 4 * x: o + 4 * x + 4]                       # ARGB32 = B,G,R,A bytes (not premultiplied)
+            if a < 10: row.append(None)
+            elif a > 250: row.append((rd, gr, bl))
+            else: f = a / 255; row.append((bgc[0] + (rd - bgc[0]) * f, bgc[1] + (gr - bgc[1]) * f, bgc[2] + (bl - bgc[2]) * f))
+        px.append(row)
+    if sharp: px = sharpen(px, W, h, sharp)
+    return [merge([fit_cell((px[2 * cy][2 * cx], px[2 * cy][2 * cx + 1], px[2 * cy + 1][2 * cx], px[2 * cy + 1][2 * cx + 1]))
+                   for cx in range(w)]) for cy in range(h // 2)]
+
+def image_frames(path, w, bg="#1e1e1e", sharp=True):
+    key = (str(path), path.stat().st_mtime, w, bg, sharp)
     if key in IMGCACHE: return IMGCACHE[key]
     imgs = []; mv = QMovie(str(path))
     if mv.isValid() and mv.frameCount() > 1:
-        first = mv.currentImage(); mv.jumpToFrame(0); first = mv.currentImage()
+        mv.jumpToFrame(0); first = mv.currentImage(); fc = mv.frameCount()
         cells = max(1, w * round(first.height() * w / max(1, first.width())) // 2)
-        for i in range(min(mv.frameCount(), max(2, min(24, 1_500_000 // (45 * cells))))): mv.jumpToFrame(i); imgs.append(mv.currentImage())
+        n = min(fc, max(2, min(24, 1_500_000 // ((60 if sharp else 45) * cells))))
+        for k in range(n): mv.jumpToFrame(k * fc // n); imgs.append(mv.currentImage())     # spread over the whole loop, not just the first frames
     else: imgs = [QImage(str(path))]
-    IMGCACHE[key] = [img2rows(i, w, bg) for i in imgs if not i.isNull() and i.width() > 0] or [[[R("(unreadable image)")]]]
+    conv = (lambda i: img2rows_quad(i, w, bg)) if sharp else (lambda i: img2rows(i, w, bg))
+    IMGCACHE[key] = [conv(i) for i in imgs if not i.isNull() and i.width() > 0] or [[[R("(unreadable image)")]]]
     return IMGCACHE[key]
 
 def lerp(c1, c2, t):
@@ -409,7 +464,7 @@ def logo_frames(g, n, O, classic):
             src = "arch" if re.search("arch|cachyos|manjaro|endeavour", ids) else "tux"
         if src == "file":
             path = g.asset(p["file"])
-            if path and path.exists() and path.suffix.lower() in IMG: return image_frames(path, int(p["width"]), O["bg"]), 0
+            if path and path.exists() and path.suffix.lower() in IMG: return image_frames(path, int(p["width"]), O["bg"], p["mode"] != "blocks-basic"), 0
             lines = path.read_text(errors="replace").splitlines() if path and path.exists() else ["(no file)"]
         else: lines = LOGOS.get(src, LOGOS["tux"])
         g_ = p["gradient"]; mode = "gradient" if g_ != "none" else "solid"; cells = None; direction = g_
@@ -418,7 +473,8 @@ def logo_frames(g, n, O, classic):
     if classic: anim = "none"; mode = "cells" if mode == "cells" else "solid"
     return render_logo(lines or [" "], cells, mode, stops, direction, anim)
 
-def compile_graph(g):
+def compile_graph(g, build=False):
+    """build=True also produces the block-character fallback for a graphics logo (the preview doesn't need it)."""
     out = next((n for n in g.nodes.values() if n["type"] == "output"), None)
     if not out: return None
     classic = bool(g.meta.get("classic")); O = dict(out["params"])
@@ -468,8 +524,18 @@ def compile_graph(g):
                 funcs[k] = SH[k]; row.append(R("{{%s}}" % k, p["color"], None, p["bold"])); pos = m.end()
             if pos < len(txt): row.append(R(txt[pos:], p["color"], None, p["bold"]))
             rows.append(row or [R("")])
-    frames, final = logo_frames(g, logo, O, classic) if logo else ([[]], 0)
-    return dict(O=O, frames=frames, final=final, rows=rows, funcs=funcs, bars=bars, classic=classic)
+    gfx = gimgs = None                       # graphics-protocol logo (kitty / iTerm2 / sixel), blocks stay the fallback
+    if logo and logo["type"] == "logo" and not classic and logo["params"]["source"] == "file" and logo["params"]["mode"] in GFX_MODES:
+        pth = g.asset(logo["params"]["file"])
+        if pth and pth.exists() and pth.suffix.lower() in IMG:
+            sz = QImageReader(str(pth)).size(); cols = int(logo["params"]["width"])
+            if sz.width() > 0: gfx = dict(path=pth, cols=cols, rows=max(1, round(sz.height() * cols / sz.width() / 2)), mode=logo["params"]["mode"])
+    if gfx and not build:
+        gimgs = gfx_images(gfx["path"], gfx["cols"])
+        if gimgs: frames, final = [[[R(" " * gfx["cols"])] for _ in range(gfx["rows"])]], 0     # blank space; the preview paints the image over it
+        else: gfx = None
+    if not (gfx and not build): frames, final = logo_frames(g, logo, O, classic) if logo else ([[]], 0)
+    return dict(O=O, frames=frames, final=final, rows=rows, funcs=funcs, bars=bars, classic=classic, gfx=gfx, gimgs=gimgs)
 
 TOK = re.compile(r"\{\{(\w+)\}\}")
 def resolve(runs, c):
@@ -498,6 +564,146 @@ def compose(c, fi):
         if i < len(c["rows"]): row += resolve(c["rows"][i], c)
         res.append(row)
     return res
+
+# ------------------------------------------------------------------ graphics-protocol logos (kitty / iTerm2 / sixel)
+# Like fastfetch's logo types: real pixels where the terminal supports them, block characters everywhere else.
+# kitty + iTerm2 are sized in cells (exact fit); sixel is sized in pixels, so a few widths are pre-built and the script
+# picks the closest one to the terminal's real cell size.
+GFX_MODES = ("auto", "kitty", "iterm", "sixel")
+SIXV = (8, 10, 12, 16, 20)               # sixel variants: pixels per cell column
+GFXCACHE = {}
+SIX_TR = bytes((i + 63) & 0xFF for i in range(256)); SIX_RLE = re.compile(rb"(.)\1{3,}", re.S)
+
+def png_bytes(img):
+    ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.OpenModeFlag.WriteOnly); img.save(buf, "PNG"); buf.close(); return bytes(ba)
+
+def gfx_images(path, cols):
+    """Frames at the pixel size sent to the terminal (also used by the preview). GIFs are sampled across the whole loop."""
+    key = (str(path), path.stat().st_mtime, cols)
+    if key in GFXCACHE: return GFXCACHE[key]
+    mv = QMovie(str(path)); src = []
+    if mv.isValid() and mv.frameCount() > 1:
+        fc = mv.frameCount(); n = min(fc, 36)
+        for k in range(n): mv.jumpToFrame(k * fc // n); src.append(mv.currentImage())
+    else: src = [QImage(str(path))]
+    src = [i for i in src if not i.isNull() and i.width() > 0]; out = []
+    tw = min(cols * 10, 480 if len(src) > 1 else 900)
+    for im in src:
+        w = min(tw, im.width()); h = max(1, round(im.height() * w / im.width()))
+        out.append(downscale(im, w, h) if w < im.width() else im.convertToFormat(QImage.Format.Format_ARGB32))
+    GFXCACHE[key] = out; return out
+
+def kitty_seq(png, cols, rows, iid=24751):
+    """kitty graphics protocol: PNG in <=4096-byte base64 chunks, placed at the cursor over cols x rows cells. q=2 = no replies, C=1 = don't move cursor."""
+    b = base64.b64encode(png).decode(); parts = [b[i:i + 4096] for i in range(0, len(b), 4096)] or [""]; out = []
+    for n, ch in enumerate(parts):
+        m = 1 if n < len(parts) - 1 else 0
+        ctl = "a=T,f=100,t=d,q=2,i=%d,p=1,c=%d,r=%d,C=1,m=%d" % (iid, cols, rows, m) if n == 0 else "q=2,m=%d" % m
+        out.append("\033_G%s;%s\033\\" % (ctl, ch))
+    return "".join(out)
+
+def iterm_seq(raw, cols, rows):
+    return "\033]1337;File=inline=1;size=%d;width=%d;height=%d;preserveAspectRatio=0:%s\a" % (len(raw), cols, rows, base64.b64encode(raw).decode())
+
+def sixel_seq(img):
+    """Sixel: palette-quantised (Qt), transparent pixels left untouched so the terminal background shows through."""
+    W, H = img.width(), img.height(); a = img.convertToFormat(QImage.Format.Format_ARGB32)
+    sa = a.bytesPerLine(); ar = bytes(a.constBits().asstring(a.sizeInBytes()))
+    flat = QImage(W, H, QImage.Format.Format_RGB32); flat.fill(QColor("#000000")); p = QPainter(flat); p.drawImage(0, 0, a); p.end()
+    q = flat.convertToFormat(QImage.Format.Format_Indexed8, Qt.ImageConversionFlag.DiffuseDither)
+    sq = q.bytesPerLine(); qb = bytes(q.constBits().asstring(q.sizeInBytes())); table = q.colorTable(); used = set(); body = []
+    for y0 in range(0, H, 6):
+        d = {}
+        for x in range(W):
+            for dy in range(min(6, H - y0)):
+                y = y0 + dy
+                if ar[y * sa + 4 * x + 3] < 128: continue
+                d.setdefault(qb[y * sq + x], bytearray(W))[x] |= 1 << dy
+        for ci, bits in d.items():
+            used.add(ci); line = bytes(bits).translate(SIX_TR).rstrip(b"?")
+            body.append(b"#%d" % ci + SIX_RLE.sub(lambda m: b"!%d%c" % (len(m[0]), m[1][0]), line) + b"$")
+        body.append(b"-")
+    pal = b"".join(b"#%d;2;%d;%d;%d" % (i, round(QColor(table[i]).red() * 100 / 255), round(QColor(table[i]).green() * 100 / 255),
+                                         round(QColor(table[i]).blue() * 100 / 255)) for i in sorted(used))
+    return b"\033P0;1;0q" + b'"1;1;%d;%d' % (W, H) + pal + b"".join(body) + b"\033\\"
+
+def gfx_assets(c):
+    """-> ({filename: bytes}, meta) for the build. Nothing is baked into the script itself, so it stays small and fast to start."""
+    g = c["gfx"]; mode, cols, rows, path = g["mode"], g["cols"], g["rows"], g["path"]
+    files, meta = {}, dict(have=[], nk=1, sxv=[], sxw=[], sxh=[]); imgs = gfx_images(path, cols)
+    if not imgs: return {}, None
+    if mode in ("auto", "kitty"):
+        for k, im in enumerate(imgs): files["kitty_%d" % k] = kitty_seq(png_bytes(im), cols, rows)
+        meta["nk"] = len(imgs); meta["have"].append("kitty")
+    if mode in ("auto", "iterm"):       # a GIF is handed over as-is so the terminal animates it by itself (like fastfetch's iterm type)
+        raw = path.read_bytes() if len(imgs) > 1 and path.suffix.lower() == ".gif" and path.stat().st_size <= 8_000_000 else png_bytes(imgs[0])
+        files["iterm"] = iterm_seq(raw, cols, rows); meta["have"].append("iterm")
+    if mode in ("auto", "sixel"):       # first frame only
+        src = QImage(str(path)).convertToFormat(QImage.Format.Format_ARGB32)
+        for cw in SIXV:
+            pw = cols * cw
+            if pw > 1600: continue
+            ph = max(1, round(pw * src.height() / src.width()))
+            im = downscale(src, pw, ph) if pw < src.width() else src.scaled(pw, ph, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            files["six_%d" % cw] = sixel_seq(im); meta["sxv"].append(cw); meta["sxw"].append(pw); meta["sxh"].append(ph)
+        if meta["sxv"]: meta["have"].append("sixel")
+    if not meta["have"]: return {}, None
+    return {k: (v.encode("ascii") if isinstance(v, str) else v) for k, v in files.items()}, meta
+
+GFX_SH = r"""G=__G__; GMODE=__GMODE__; HAVE=__HAVE__; GAP=__GAP__; COLS=__COLS__; ROWS=__ROWS__; NK=__NK__; LIFE=__LIFE__; LOOPS=__LOOPS__; DELAY=__DELAY__
+SXV=(__SXV__); SXW=(__SXW__); SXH=(__SXH__)
+SAVE=$'\033'7; REST=$'\033'8
+have(){ case " $HAVE " in *" $1 "*) return 0;; esac; return 1; }
+gfx_proto(){   # which graphics protocol does THIS terminal speak? sets GP, or fails -> block characters
+  GP=; [ -t 1 ] || return 1
+  case $GMODE in kitty|iterm|sixel) have "$GMODE" && GP=$GMODE; [ -n "$GP" ]; return;; esac
+  [ -n "$TMUX$STY" ] && return 1
+  if have kitty && { [ -n "$KITTY_WINDOW_ID" ] || [ "$TERM" = xterm-kitty ] || [ "$TERM" = xterm-ghostty ] || [ "$TERM_PROGRAM" = ghostty ] || [ "$TERM_PROGRAM" = WezTerm ]; }; then GP=kitty; return 0; fi
+  if have iterm && [ "$TERM_PROGRAM" = iTerm.app ]; then GP=iterm; return 0; fi
+  have sixel || return 1
+  case $TERM in linux|dumb|"") return 1;; esac
+  [ -r /dev/tty ] || return 1
+  local r; printf '\033[c' >/dev/tty; IFS= read -rs -d c -t 0.4 r </dev/tty || return 1      # DA1 reply lists 4 when sixel is supported
+  case ";${r#*\?};" in *";4;"*) GP=sixel; return 0;; esac
+  return 1
+}
+gfx_size(){    # image size in cells (kitty/iTerm2: fixed; sixel: from the terminal's real cell size)
+  GCOLS=$COLS; GROWS=$ROWS; GFILE=
+  [ "$GP" = sixel ] || return 0
+  local cw=10 ch=20 a= b= e v=0 best=999 d i
+  if [ -r /dev/tty ]; then printf '\033[16t' >/dev/tty; IFS=';' read -rs -d t -t 0.4 e a b </dev/tty 2>/dev/null; fi
+  [[ $a =~ ^[0-9]+$ && $b =~ ^[0-9]+$ ]] && ((a>0 && b>0)) && { ch=$a; cw=$b; }
+  for i in "${!SXV[@]}"; do d=$((cw-SXV[i])); ((d<0)) && d=$((-d)); ((d<best)) && { best=$d; v=$i; }; done
+  GFILE=six_${SXV[v]}; GCOLS=$(( (SXW[v]+cw-1)/cw )); GROWS=$(( (SXH[v]+ch-1)/ch ))
+}
+gfx_emit(){ case $GP in kitty) cat "$G/kitty_$1";; iterm) cat "$G/iterm";; sixel) cat "$G/$GFILE";; esac; }
+gfx_anim(){    # kitty only: re-send frames at the same spot until the first command runs (intro: LOOPS times)
+  local sp=$PPID
+  (
+    idle(){ local s; s=$(</proc/$sp/stat) 2>/dev/null || return 1; s=${s##*) }; set -- $s; [ "$3" = "$6" ]; }
+    for _i in $(seq 20); do idle && break; sleep 0.1; done
+    k=1; n=0
+    while kill -0 "$sp" 2>/dev/null && idle && { [ "$LIFE" = live ] || ((n<NK*LOOPS)); }; do
+      printf '%s\033[%d;1H' "$SAVE" "$top"; cat "$G/kitty_$((k%NK))"; printf '%s' "$REST"; k=$((k+1)); n=$((n+1)); sleep $DELAY
+    done
+    if [ "$LIFE" != live ] && kill -0 "$sp" 2>/dev/null && idle; then printf '%s\033[%d;1H' "$SAVE" "$top"; cat "$G/kitty_0"; printf '%s' "$REST"; fi
+  ) >/dev/tty 2>/dev/null &
+  disown 2>/dev/null
+}
+gfx_main(){
+  local n=${#INFO[@]} H=$GROWS i off row e c; top=
+  off=$((GCOLS+GAP)); ((n>H)) && H=$n
+  for ((i=0;i<H;i++)); do printf '\n'; done; printf '\033[%dA' "$H"             # reserve the lines, back to the top
+  if [ "$GP" = kitty ] && ((NK>1)) && [ -r /dev/tty ]; then
+    printf '\033[6n' >/dev/tty; IFS='[;' read -rs -d R -t 1 e row c </dev/tty && top=$row
+  fi
+  printf '%s' "$SAVE"; gfx_emit 0; printf '%s' "$REST"                          # image at the top-left, cursor restored
+  for ((i=0;i<n;i++)); do printf '\033[%dC%s\033[0m\n' "$off" "${INFO[i]}"; done
+  for ((i=n;i<H;i++)); do printf '\n'; done
+  [[ $top =~ ^[0-9]+$ ]] && gfx_anim
+  return 0
+}
+if gfx_proto; then gfx_size; gfx_main; exit 0; fi"""
 
 # ------------------------------------------------------------------ build: standalone bash script + shell hooks
 def esc(t): return t.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
@@ -563,7 +769,7 @@ if ((NF>1)) && [ -t 1 ]; then
   fi
 else render FR$FIN; fi"""
 
-def gen_script(c):
+def gen_script(c, gdir=None, meta=None):
     O = c["O"]; frames = c["frames"]
     L = ["#!/usr/bin/env bash", "# Generated by Fetch Studio. Standalone - the app does not need to be running.",
          ". /etc/os-release 2>/dev/null", BAR_FN]
@@ -577,6 +783,12 @@ def gen_script(c):
         for row in fr: L.append("  " + "".join("$'%s'" % lit(r) for r in row) + "$'%s'" % (" " * (lw - rlen(row) + gap)))
         L.append(")")
     L.append("PAD=$'%s'" % (" " * (lw + gap)))
+    if c.get("gfx") and meta and gdir:                    # graphics logo: tried first, falls through to the blocks below if the terminal can't do it
+        gf = c["gfx"]
+        L.append(GFX_SH.replace("__G__", shlex.quote(str(gdir))).replace("__GMODE__", gf["mode"]).replace("__HAVE__", "'%s'" % " ".join(meta["have"]))
+                 .replace("__GAP__", str(gap)).replace("__COLS__", str(gf["cols"])).replace("__ROWS__", str(gf["rows"])).replace("__NK__", str(meta["nk"]))
+                 .replace("__LIFE__", O["lifetime"]).replace("__LOOPS__", str(int(O["loops"]))).replace("__DELAY__", "%.3f" % (1 / max(1, int(O["fps"]))))
+                 .replace("__SXV__", " ".join(map(str, meta["sxv"]))).replace("__SXW__", " ".join(map(str, meta["sxw"]))).replace("__SXH__", " ".join(map(str, meta["sxh"]))))
     L.append(TAIL.replace("__NF__", str(len(frames))).replace("__FIN__", str(c["final"])).replace("__NI__", str(len(frames) - 8 if c["final"] else len(frames))).replace("__MODE__", O["lifetime"])
              .replace("__LOOPS__", str(int(O["loops"]))).replace("__DELAY__", "%.3f" % (1 / max(1, int(O["fps"])))))
     return "\n".join(L) + "\n"
@@ -605,14 +817,15 @@ def remove_hooks():
             t = strip_block(path.read_text())
             if kind == "fish" and not t.strip(): path.unlink()
             else: path.write_text(t)
-    (ACTIVE / "fetch.sh").unlink(missing_ok=True)
+    (ACTIVE / "fetch.sh").unlink(missing_ok=True); shutil.rmtree(ACTIVE / "gfx", ignore_errors=True)
 
 # ------------------------------------------------------------------ terminal preview (cell-exact painter)
 class TermView(QWidget):
     def __init__(s):
-        super().__init__(); s.rows = []; s.bg = "#1e1e1e"; s.fg = "#d0d0d0"; s.title = "Terminal"; s.fsize = 11
+        super().__init__(); s.rows = []; s.bg = "#1e1e1e"; s.fg = "#d0d0d0"; s.title = "Terminal"; s.fsize = 11; s.overlay = None
         s.setMinimumSize(460, 320)
-    def set(s, rows, bg, fg, title, fsize): s.rows, s.bg, s.fg, s.title, s.fsize = rows, bg, fg, title, fsize; s.update()
+    def set(s, rows, bg, fg, title, fsize, overlay=None):      # overlay = (QImage, cols, rows): a graphics-protocol logo painted over the blank cells
+        s.rows, s.bg, s.fg, s.title, s.fsize, s.overlay = rows, bg, fg, title, fsize, overlay; s.update()
     def col(s, c): return QColor(PAL[int(c[1:])]) if c[0] == "a" else QColor(c)
     def paintEvent(s, e):
         p = QPainter(s); f = QFont("Monospace", s.fsize); f.setStyleHint(QFont.StyleHint.Monospace); f.setFixedPitch(True)
@@ -627,6 +840,9 @@ class TermView(QWidget):
         maxc = max((rlen(r) for r in s.rows), default=0); nrows = len(s.rows) + 1
         sc = min(1.0, (s.width() - 20) / max(1.0, maxc * cw), (s.height() - bar - 16) / max(1.0, nrows * ch))
         p.translate(10, bar + 8); p.scale(sc, sc); x0, y0 = 0, 0; x = y = 0
+        if s.overlay:
+            im, oc, orr = s.overlay; p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawImage(QRectF(0, 0, oc * cw, orr * ch), im)
         for y, row in enumerate(list(s.rows) + [prompt]):
             x = x0; ty = y0 + y * ch
             for t, fg, bg, b in row:
@@ -634,9 +850,13 @@ class TermView(QWidget):
                 for c in t:
                     ix, iy = round(x), round(ty); iw, ih = round(x + cw) - ix, round(ty + ch) - iy; hm = round(ty + ch / 2) - iy
                     if bg: p.fillRect(QRect(ix, iy, iw, ih), s.col(bg))
-                    if c == "▀": p.fillRect(QRect(ix, iy, iw, hm), col)
-                    elif c == "▄": p.fillRect(QRect(ix, iy + hm, iw, ih - hm), col)
-                    elif c == "█": p.fillRect(QRect(ix, iy, iw, ih), col)
+                    q = QUAD.get(c)
+                    if q == 15: p.fillRect(QRect(ix, iy, iw, ih), col)
+                    elif q:                                              # half / quadrant blocks, drawn cell-exact
+                        hw = round(x + cw / 2) - ix
+                        for bit, rx, ry, rw, rh in ((1, ix, iy, hw, hm), (2, ix + hw, iy, iw - hw, hm),
+                                                    (4, ix, iy + hm, hw, ih - hm), (8, ix + hw, iy + hm, iw - hw, ih - hm)):
+                            if q & bit: p.fillRect(QRect(rx, ry, rw, rh), col)
                     elif c != " ": p.setPen(col); p.drawText(QPointF(x, ty + asc), c)
                     x += cw
         p.fillRect(QRectF(x, y0 + y * ch, cw, ch), QColor(s.fg))
@@ -910,7 +1130,7 @@ class PropPanel(QScrollArea):
     def set(s, k, v):
         s.d["params"][k] = v
         if k == "theme" and v != "none": s.win.apply_theme(v); s.later_refresh()
-        if k == "field": s.later_refresh()          # show/hide Weather and Custom options
+        if k in ("field", "source"): s.later_refresh()          # show/hide Weather, Custom and image options
         s.win.node_changed(s.d)
     def pick_color(s, k, b):
         c = QColorDialog.getColor(QColor(s.d["params"][k]), s)
@@ -1382,15 +1602,21 @@ class Main(QMainWindow):
     def touch(s): s.dirty = True; s.recompile(); s.title()
     def recompile(s):
         s.comp = compile_graph(s.g); s.fi = 0
-        n = len(s.comp["frames"]) if s.comp else 1
+        n = s.nfr()
         s.timer.start(int(1000 / max(1, int(s.comp["O"]["fps"]))) if n > 1 else 300); s.render()
+    def nfr(s):
+        c = s.comp
+        if not c: return 1
+        return len(c["gimgs"]) if c.get("gfx") and c.get("gimgs") else len(c["frames"])
     def tick(s):
-        if s.comp and len(s.comp["frames"]) > 1: s.fi += 1; s.render()
+        if s.comp and s.nfr() > 1: s.fi += 1; s.render()
         elif STATE["dirty"]: s.render()
     def render(s):
         STATE["dirty"] = False; PREVIEW["terminal"] = s.g.meta.get("terminal"); t = TERMS.get(s.g.meta.get("terminal"), TERMS["GNOME Terminal"])
         if not s.comp: s.term.set([], "#1e1e1e", "#d0d0d0", t[0], t[1]); return
-        O = s.comp["O"]; s.term.set(compose(s.comp, s.fi), O["bg"], O["fg"], t[0], t[1])
+        c = s.comp; O = c["O"]; gi = c.get("gimgs")
+        ov = (gi[s.fi % len(gi)], c["gfx"]["cols"], c["gfx"]["rows"]) if c.get("gfx") and gi else None
+        s.term.set(compose(c, s.fi), O["bg"], O["fg"], t[0], t[1], ov)
     def import_asset(s, path):
         d = s.g.dir / "assets"; d.mkdir(parents=True, exist_ok=True); name = Path(path).name; dst = d / name; k = 1
         while dst.exists() and not dst.samefile(path): dst = d / f"{k}_{name}"; k += 1
@@ -1489,15 +1715,26 @@ class Main(QMainWindow):
             s.open_graph(s.read(name))
         except Exception as ex: QMessageBox.warning(s, APP, "Could not import:\n%s" % ex)
     def build(s):
-        c = compile_graph(s.g)
+        c = compile_graph(s.g, True)
         if not c: QMessageBox.warning(s, APP, "Add an Output node first."); return
         s.save(); ACTIVE.mkdir(parents=True, exist_ok=True); (DATA / "built").mkdir(exist_ok=True)
-        text = gen_script(c)
-        for p in (ACTIVE / "fetch.sh", DATA / "built" / (s.g.name + ".sh")): p.write_text(text); p.chmod(0o755)
+        gfiles, meta = {}, None
+        if c.get("gfx"):
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)             # sixel variants take a few seconds to encode
+            try: gfiles, meta = gfx_assets(c)
+            finally: QApplication.restoreOverrideCursor()
+        for sp, gd in ((ACTIVE / "fetch.sh", ACTIVE / "gfx"), (DATA / "built" / (s.g.name + ".sh"), DATA / "built" / (s.g.name + ".gfx"))):
+            shutil.rmtree(gd, ignore_errors=True)
+            if gfiles:
+                gd.mkdir(parents=True)
+                for fn, data in gfiles.items(): (gd / fn).write_bytes(data)
+            sp.write_text(gen_script(c, gd, meta)); sp.chmod(0o755)
         files = install_hooks(); s.flags["built"] = True
         found = [n for n, (_, _, exe) in TERMS.items() if shutil.which(exe)]
         anim = "" if len(c["frames"]) < 2 else ("\n\nAnimation: stays live until you run your first command (a terminal cannot redraw text that has scrolled away)."
                                                 if c["O"]["lifetime"] == "live" else "\n\nAnimation: plays at launch, then stops on the final frame.")
+        if meta: anim += ("\n\nLogo: real graphics (%s) in terminals that support them, detected each time a terminal opens; "
+                          "everywhere else the sharp block-character version is shown. Inside tmux/screen, blocks are used." % ", ".join(meta["have"]))
         QMessageBox.information(s, APP, "Built for %s.\n\nScript: %s\nShell hooks:\n  %s\n\nTerminals found here: %s%s\n\nOpen a new terminal to see it. "
                                 "The app is no longer needed; use Build again after editing, or Remove to uninstall." %
                                 (distro_family(), ACTIVE / "fetch.sh", "\n  ".join(map(str, files)), ", ".join(found) or "none detected", anim))
