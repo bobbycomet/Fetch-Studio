@@ -70,7 +70,7 @@ printed first, the next one down second, and so on. If two nodes sit at the same
 ### Logos, gradients and animation
 * Gradients: horizontal, vertical, diagonal, radial.
 * Animations: rainbow, scroll, pulse, wave, typewriter, sparkle, scanline.
-* Images and GIFs are converted to half-block color art. Set **Image width** (up to 200 columns) for more detail.
+* Images and GIFs are converted to half-block color art. Set **Image width** (up to 200 columns) for more detail. You an now, as of 1.3.0 use kitty, iterm, and sixel for better image quality.
 * **Animation lifetime** (Output node):
 
 | Mode | Behaviour |
