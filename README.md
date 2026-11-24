@@ -1,178 +1,115 @@
 # Fetch Studio
-**Make your terminal yours.**
 
-Fetch Studio is a visual system-fetch and terminal personalization tool designed to make Linux customization fun, approachable, and creative again.
+**Design your terminal's system-info screen (neofetch / fastfetch style) by connecting boxes. No code, no config files.**
 
-For years, users who wanted to personalize their desktop were largely limited to the tools provided by their desktop environment. Terminal customization was an entirely different challenge. Creating a custom fetch presentation or ASCII logo often meant searching Reddit, digging through tutorials, hunting down symbols, manually editing configuration files, and piecing together the result line by line. While tools existed to help, many still required working directly in the terminal, writing configurations by hand, and spending hours—or even days—to achieve the look you wanted.
+Fetch Studio is a desktop app (PyQt6) where you build the look of your terminal greeting on a node graph and watch a
+1:1 live terminal preview update as you go. When you press **Build**, it installs a small standalone script and hooks it into
+your shell. After that the app can be closed: every new terminal shows your design.
 
-**Fetch Studio changes that.**
+---
 
-What once could take days of searching, experimentation, and manual configuration can now be done in minutes or a couple of hours, depending on the complexity of your design and how much effort you put into creating your artwork.
+## Why it exists
 
-Fetch Studio brings visual tools to terminal customization, letting you design your own fetch layouts, create custom ASCII artwork, experiment with colors, symbols, shapes, and effects, and bring your ideas to life without having to become an expert in terminal formatting or configuration syntax first.
+Tools like neofetch and fastfetch are loved, but customizing them means editing config files, learning ANSI color codes and
+fighting alignment by hand. Most people just want to say *"show my OS and RAM, put a cool logo on the left, make it purple."*
 
-Inspired by the spirit of tools like Neofetch, Fetch Studio isn't just about displaying system information. It's about making the terminal your own.
+**The philosophy is simple: making a fetch should be approachable for anyone, with no code.**
 
-## Simplicity over complexity
+* **Everything is visual.** Pick, drag, connect, recolor. What you see in the preview is what your terminal prints.
+* **Nothing to memorize.** An interactive lesson walks you from an empty canvas to an installed result and won't advance until you complete each step.
+* **Start simple, grow when you want.** Presets and **Classic mode** give you plain ASCII art and readouts; gradients, animation, meters and themes are there when you want them.
+* **Your design is yours to share.** A project is one zip. A custom logo is one `.fsnode` file. Neither can contain code.
+* **No lock-in.** The result is an ordinary bash script plus a couple of lines in your shell config. Remove it any time.
 
-- One node to output = instant change: Connect a node to see its effect right away.
-- Self-contained nodes: Edit text, colors, and options directly inside the node—no tangled wiring required.
-- Stackable info nodes: Every info node you add brings another piece of system info into your terminal.
-- 6-minute custom setups: Start with simple built-in logo examples and get a look that feels yours fast.
-- Add what you want: Build up your output at your own pace without fighting complex node graphs.
+---
 
-## Philosophy
+## How the graph works (and how node position matters)
 
-Fetch Studio isn't just about displaying system information. It's about how you choose to display it.
+Every design has one **Output** node. Everything you want on screen is a node connected to Output's input port:
 
-Terminal customization shouldn't feel intimidating or require you to be an expert. It should be something anyone can enjoy.
+| Node | What it adds |
+|------|--------------|
+| **Logo** | Built-in ASCII, your own text file, or an image/GIF, with optional gradient and animation |
+| **Custom Logo** | A logo you drew in the ASCII Designer (or imported as `.fsnode`) |
+| **Title** | `user@host` line, with optional underline |
+| **Info** | One readout: OS, Host, Kernel, Uptime, Packages, Shell, DE, Session, Terminal (the terminal emulator, never the file manager that launched it), CPU, GPU, Memory, Disk, Swap, Load, Battery, LocalIP, Resolution, Locale, or a **Custom** command |
+| **Meter bar** *(modern)* | A colored usage bar for Memory, Disk, CPU load, Swap or Battery |
+| **Divider** *(modern)* | A line (optionally labeled, optionally gradient) to separate sections |
+| **Color bar** | The classic row(s) of terminal palette blocks |
+| **Text** | Any line of text you type |
 
-- **Creativity first** — Your terminal should reflect your personality, not just display a generic template.
-- **Accessible customization** — Build and customize your fetch without needing to know scripting, ANSI codes, or complicated configuration syntax.
-- **Powerful when you need it** — Simple tools for beginners, advanced customization for experienced users.
-- **Fun to use** — Customizing your terminal should be an enjoyable experience, not a chore.
-- **Your creation, your way** — Create, save, export, share, and reuse your designs.
+### Position on the canvas = order on the terminal
 
-## Visual Design Studio
+**The vertical position of a node decides where its line appears in the terminal.** The node that is highest on the canvas is
+printed first, the next one down second, and so on. If two nodes sit at the same height, the one further left goes first.
 
-Fetch Studio uses a node-based editor to construct your terminal fetch output visually.
+* To **reorder** your output, drag nodes up or down. The preview updates immediately.
+* The **Logo / Custom Logo** node is the exception: it always occupies the left column beside the text, so its position on the
+  canvas does not matter. Only the **first** logo (by position) connected to Output is used.
+* Only nodes **connected to Output** are shown. A node left unplugged is ignored, which makes it handy as a parking spot.
+* **Groups** (box-select with Shift, right-click, *Group selected nodes*) are for tidying the canvas. Collapsing a group does not change the order.
+* Left/right placement has no effect except as the tie-breaker above, so arrange columns however keeps your graph readable.
 
-Instead of editing configuration files by hand, you create your design using nodes, connect them together, and customize their properties.
+---
 
-### Node-based editor
+## Features
 
-Build your fetch layout using visual nodes, including:
+### Presets and modes
+* **Classic** (neofetch-like), **Advanced** (fastfetch-like) and **Custom** (you choose everything).
+* **Classic mode** (toolbar toggle, saved per project): only ASCII art and system readouts. Gradients, animation, meters and dividers are hidden and ignored at build time.
+* **Color themes**: Dracula, Nord, Gruvbox, Catppuccin, Tokyo Night. One click recolors the whole graph.
 
-- **Title** — Display titles, usernames, and identifying information.
-- **Info** — Display system information.
-- **Logo** — Add system logos or custom artwork.
-- **Output** — Configure how connected elements are rendered in the terminal.
+### Logos, gradients and animation
+* Gradients: horizontal, vertical, diagonal, radial.
+* Animations: rainbow, scroll, pulse, wave, typewriter, sparkle, scanline.
+* Images and GIFs are converted to half-block color art. Set **Image width** (up to 200 columns) for more detail.
+* **Animation lifetime** (Output node):
 
-Organize your nodes, group related elements, and customize the output to create your own design.
+| Mode | Behaviour |
+|------|-----------|
+| `intro` (default) | Plays once when the terminal opens (about a second), then stops on the final frame. *Intro loops* can repeat it, but each loop delays your prompt. Works everywhere. |
+| `live` | Keeps animating in place **until you run your first command**, then stops for good. |
 
-### Live terminal preview
+  *Why not forever?* A terminal is a stream of text, not a canvas. Once text scrolls away it cannot be redrawn, and an animator
+  running while a command prints would corrupt the screen. `live` needs a terminal that answers the cursor-position query and
+  a Linux `/proc`, and is not guaranteed inside multiplexers or when the logo is taller than the window.
 
-See your design as you build it with the integrated terminal preview.
+### ASCII Designer (second tab)
+* Symbol palette (ASCII, box drawing, blocks and shades, geometric, arrows, symbols, braille, math). Click to pick, **drag onto the canvas**, or just type.
+* Tools: Draw, Erase, Paint (per-cell color), Pick, and Select/Move for rearranging regions. Undo/redo with Ctrl+Z / Ctrl+Y.
+* Starter art, text-file import, and image-to-ASCII import.
+* **Save as node** adds a Custom Logo node to your graph, connected to Output, and stores it in `~/.local/share/fetchstudio/nodes/`.
+  Double-click a custom node to reopen it.
 
-Experiment with layouts, colors, logos, and output settings without having to repeatedly build and run your fetch to see the results.
+### Sharing
+* **Export** writes `fetchstudio(<project name>).zip` containing the node graph and every image/GIF you used. **Import** restores the graph exactly.
+* **`.fsnode`** is a single-logo "plugin" file (JSON). Import validates sizes, colors and characters; plugin files are data only and can never run code. Custom logos are also embedded in the project zip.
 
-### Customization
+### Build and install
+**Build** writes `~/.local/share/fetchstudio/active/fetch.sh` and adds a clearly marked block to:
 
-Configure the presentation of your fetch output, including:
+* `~/.bashrc` (Debian/Ubuntu, Arch, CachyOS, openSUSE, Fedora and others),
+* `~/.zshrc` if you use zsh,
+* `~/.config/fish/conf.d/fetchstudio.fish` if fish is installed (CachyOS ships fish by default).
 
-- Output presets
-- Background and text colors
-- Separators
-- Logo spacing
-- Logo animation
-- Animation speed
+**Remove** deletes the hooks and the script. The generated script is plain bash and only reads system information; the app does not need to be running.
 
-Your design is yours to create.
+### Saving and safety
+* Auto-save every 10 minutes, **Ctrl+S** to save, and a Save / Discard / Cancel prompt when you exit or start/open/import another project with unsaved changes.
+* Controls: left-drag pans, Shift+left-drag box-selects, right-click opens options (add node, group, collapse/expand, delete), scroll moves up/down, Ctrl+scroll zooms, double-click a group to collapse it.
 
-## ASCII Designer
+### Interactive lesson
+First launch starts a guided lesson that highlights the part of the window you need and only lets you continue when the step is done. Progress is saved; press **F1** or **Lesson** to resume or restart.
 
-Creating ASCII art shouldn't require searching for the right characters, learning symbol conventions, or manually positioning everything in a text editor.
+---
 
-Fetch Studio includes a dedicated ASCII Designer that gives you a visual workspace for creating custom terminal artwork. Whether you want to create something simple or build a complex piece of artwork, the tools are there to help you bring your ideas to life.
+## Terminals
 
-Use a selection of symbols, line art, shapes, and other characters to construct your designs. Build artwork piece by piece, experiment with different elements, and create something entirely your own.
+The result is printed by your shell, so it works in any terminal: GNOME Terminal, Console (`kgx`), Konsole, Xfce Terminal,
+MATE Terminal, QTerminal, LXTerminal, Tilix, Deepin Terminal, COSMIC Terminal, Pantheon Terminal and others. The preview's terminal selector changes the window title and font size only.
+Writing each terminal's own profile settings (fonts/palettes) is not implemented yet.
 
-You aren't limited to a predefined collection of logos or templates. Create simple designs, detailed artwork, or anything in between, then use your creations within your Fetch Studio layouts.
+## Requirements and building
 
-The ASCII Designer makes terminal artwork more accessible, turning what could otherwise be a tedious, time-consuming process into a creative experience.
-
-## System Information
-
-Fetch Studio provides a range of system information, allowing you to choose what you want to display and how you want to present it.
-
-| Information | Description |
-|---|---|
-| OS | Operating system and distribution |
-| Host | Hostname/system host information |
-| Uptime | Time the system has been running |
-| Kernel | Kernel version |
-| Packages | Installed package count |
-| Shell | Current shell |
-| DE | Desktop environment |
-| Session | Current session type |
-| Terminal | Terminal emulator |
-| CPU | Processor information |
-| GPU | Graphics hardware |
-| Memory | System memory information |
-| Disk | Storage information |
-| Resolution | Display resolution |
-| Locale | System locale |
-| Custom | User-defined information |
-
-### Custom information
-
-A custom entry allows users to include information beyond the built-in system fields, further extending their personalization options.
-
-## Logo Support
-
-Fetch Studio supports multiple logo formats:
-
-- **Images** — Image-based artwork.
-- **GIF** — Animated artwork.
-- **Text files** — Text-based logos, including ASCII art.
-
-Users aren't restricted to a predefined distro logo. They can bring their own artwork and customize the look of their fetch. With the ASCII Designer, they can also create artwork of their own directly within Fetch Studio.
-
-## Terminal Compatibility
-
-Fetch Studio supports a range of terminal emulators across Linux desktop environments.
-
-Currently supported terminals:
-
-- GNOME Terminal
-- Console (KGX)
-- Konsole
-- SFCE Terminal
-- MATE Terminal
-- QtTerminal
-- LXTerminal
-- Tilix
-- Deepin Terminal
-- COSMIC Terminal
-- Pantheon Terminal
-
-## Animation & Visual Effects
-
-Fetch Studio supports visual customization and animated presentation, giving users more ways to personalize their terminal output.
-
-Features include logo animation, configurable animation speed, and visual effects to help bring designs to life.
-
-## Import, Export & Sharing
-
-Create designs you can keep, reuse, and share.
-
-Fetch Studio is designed around user-created content, allowing custom artwork and designs to become reusable parts of your terminal presentation. Import and export capabilities make it easier to preserve your work, share creations, and build on designs made by others.
-
-## Learn as You Create
-
-Fetch Studio includes a Lesson feature intended to help users learn as they work.
-
-Customization shouldn't require prior experience. Fetch Studio aims to make the process approachable while helping users understand the tools and techniques they're using along the way.
-
-## Project Goals
-
-- Fast system information
-- Lightweight terminal output
-- Visual fetch design
-- Accessible customization
-- Advanced layout control
-- Custom ASCII artwork
-- Terminal-friendly animation
-- Reusable and shareable designs
-- Broad terminal compatibility
-- A creative and enjoyable Linux customization experience
-
-Fetch Studio isn't built to compete over who displays the most system information or who can produce the fastest benchmark. Performance and capability matter, but the goal is to make terminal customization something people genuinely enjoy doing.
-
-## The Idea
-
-The terminal is more than a place to run commands. It's part of your Linux experience.
-
-Fetch Studio is here to help you make it yours.
-
-**Make your terminal yours.**
+* Linux with bash, Python 3.9+ and PyQt6 (`pip install PyQt6`), then `python3 fetchstudio.py`.
+* Released as an AppImage built on glibc 2.34+ by `.github/workflows/build-appimage.yml` (tag `v*` or run manually).
