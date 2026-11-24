@@ -59,7 +59,7 @@ SPEC = {
         P("loops", "Intro loops", "int", 2, (1, 6), True)]),
     "logo": ("Logo", "#2980b9", [
         P("source", "Source", "combo", "auto", ["auto", "tux", "arch", "file"]),
-        P("file", "Image / GIF / text file", "file", ""), P("width", "Image width (cols)", "int", 36, (8, 80)),
+        P("file", "Image / GIF / text file", "file", ""), P("width", "Image width (cols) — higher = sharper", "int", 72, (8, 200)),
         P("color", "Color", "color", "#3daee9"),
         P("gradient", "Gradient", "combo", "none", GRADS, True), P("color2", "Gradient color 2", "color", "#bb9af7", True),
         P("color3", "Gradient color 3", "color", "#f7768e", True),
@@ -237,30 +237,43 @@ def merge(runs):
 def rlen(row): return sum(len(r[0]) for r in row)
 
 IMGCACHE = {}
-def img2rows(img, w):
-    h = max(2, round(img.height() * w / img.width() / 2) * 2)
-    s = img.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio,
-                   Qt.TransformationMode.SmoothTransformation).convertToFormat(QImage.Format.Format_ARGB32)
+def downscale(img, w, h):
+    """Clean downscale: premultiplied alpha + repeated smooth halving (area-style averaging, no aliasing)."""
+    img = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    ign, smooth = Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
+    while img.width() >= w * 2 and img.height() >= h * 2:
+        img = img.scaled(max(w, img.width() // 2), max(h, img.height() // 2), ign, smooth)
+    return img.scaled(w, h, ign, smooth).convertToFormat(QImage.Format.Format_ARGB32)
+
+def img2rows(img, w, bg="#1e1e1e"):
+    """Half-block art: every character cell = 2 square pixels (top = fg, bottom = bg). Soft alpha edges blend into `bg`."""
+    h = max(2, round(img.height() * w / img.width() / 2) * 2); s = downscale(img, w, h)
+    def px(x, y):
+        c = s.pixelColor(x, y); a = c.alphaF()
+        if a < 0.04: return None
+        return c.name() if a > 0.98 else lerp(bg, c.name(), a)
     rows = []
     for y in range(0, h, 2):
         row = []
         for x in range(w):
-            a, b = s.pixelColor(x, y), s.pixelColor(x, y + 1); ta, tb = a.alpha() > 60, b.alpha() > 60
-            if ta and tb: row.append(R("▀", a.name(), b.name()))
-            elif ta: row.append(R("▀", a.name()))
-            elif tb: row.append(R("▄", b.name()))
+            a, b = px(x, y), px(x, y + 1)
+            if a and b: row.append(R("█", a) if a == b else R("▀", a, b))
+            elif a: row.append(R("▀", a))
+            elif b: row.append(R("▄", b))
             else: row.append(R(" "))
         rows.append(merge(row))
     return rows
 
-def image_frames(path, w):
-    key = (str(path), path.stat().st_mtime, w)
+def image_frames(path, w, bg="#1e1e1e"):
+    key = (str(path), path.stat().st_mtime, w, bg)
     if key in IMGCACHE: return IMGCACHE[key]
     imgs = []; mv = QMovie(str(path))
     if mv.isValid() and mv.frameCount() > 1:
-        for i in range(min(mv.frameCount(), 24)): mv.jumpToFrame(i); imgs.append(mv.currentImage())
+        first = mv.currentImage(); mv.jumpToFrame(0); first = mv.currentImage()
+        cells = max(1, w * round(first.height() * w / max(1, first.width())) // 2)
+        for i in range(min(mv.frameCount(), max(2, min(24, 1_500_000 // (45 * cells))))): mv.jumpToFrame(i); imgs.append(mv.currentImage())
     else: imgs = [QImage(str(path))]
-    IMGCACHE[key] = [img2rows(i, w) for i in imgs if not i.isNull()] or [[[R("(unreadable image)")]]]
+    IMGCACHE[key] = [img2rows(i, w, bg) for i in imgs if not i.isNull() and i.width() > 0] or [[[R("(unreadable image)")]]]
     return IMGCACHE[key]
 
 def lerp(c1, c2, t):
@@ -327,7 +340,7 @@ def logo_frames(g, n, O, classic):
             src = "arch" if re.search("arch|cachyos|manjaro|endeavour", ids) else "tux"
         if src == "file":
             path = g.asset(p["file"])
-            if path and path.exists() and path.suffix.lower() in IMG: return image_frames(path, int(p["width"])), 0
+            if path and path.exists() and path.suffix.lower() in IMG: return image_frames(path, int(p["width"]), O["bg"]), 0
             lines = path.read_text(errors="replace").splitlines() if path and path.exists() else ["(no file)"]
         else: lines = LOGOS.get(src, LOGOS["tux"])
         g_ = p["gradient"]; mode = "gradient" if g_ != "none" else "solid"; cells = None; direction = g_
@@ -529,17 +542,19 @@ class TermView(QWidget):
         p.fillRect(0, bar, s.width(), s.height() - bar, QColor(s.bg))
         user, host = os.environ.get("USER", "user"), platform.node()
         prompt = [R(f"{user}@{host}", "a10", None, True), R(":"), R("~", "a12", None, True), R("$ ")]
-        x0, y0 = 10, bar + 8; x = y = 0
+        maxc = max((rlen(r) for r in s.rows), default=0); nrows = len(s.rows) + 1
+        sc = min(1.0, (s.width() - 20) / max(1.0, maxc * cw), (s.height() - bar - 16) / max(1.0, nrows * ch))
+        p.translate(10, bar + 8); p.scale(sc, sc); x0, y0 = 0, 0; x = y = 0
         for y, row in enumerate(list(s.rows) + [prompt]):
             x = x0; ty = y0 + y * ch
             for t, fg, bg, b in row:
                 col = s.col(fg or s.fg); f.setBold(b); p.setFont(f)
                 for c in t:
-                    r = QRectF(x, ty, cw, ch)
-                    if bg: p.fillRect(r, s.col(bg))
-                    if c == "▀": p.fillRect(QRectF(x, ty, cw, ch / 2), col)
-                    elif c == "▄": p.fillRect(QRectF(x, ty + ch / 2, cw, ch / 2), col)
-                    elif c == "█": p.fillRect(r, col)
+                    ix, iy = round(x), round(ty); iw, ih = round(x + cw) - ix, round(ty + ch) - iy; hm = round(ty + ch / 2) - iy
+                    if bg: p.fillRect(QRect(ix, iy, iw, ih), s.col(bg))
+                    if c == "▀": p.fillRect(QRect(ix, iy, iw, hm), col)
+                    elif c == "▄": p.fillRect(QRect(ix, iy + hm, iw, ih - hm), col)
+                    elif c == "█": p.fillRect(QRect(ix, iy, iw, ih), col)
                     elif c != " ": p.setPen(col); p.drawText(QPointF(x, ty + asc), c)
                     x += cw
         p.fillRect(QRectF(x, y0 + y * ch, cw, ch), QColor(s.fg))
