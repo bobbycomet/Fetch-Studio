@@ -10,41 +10,21 @@ permissions:
 
 jobs:
   appimage:
-    # The runner VM is only the host. The build runs inside AlmaLinux 9 (RHEL 9 clone), whose glibc
-    # is exactly 2.34. PyQt6 6.12 wheels are tagged manylinux_2_34 (they need glibc 2.34+), so
-    # 2.34 is the lowest baseline that can install them, and every system library PyInstaller
-    # collects here is linked against 2.34 at most. (On ubuntu-22.04, glibc is 2.35 and the
-    # bundle fails the check below.)
+    # ubuntu-22.04 ships glibc 2.35. The bundle is checked below so it never needs anything newer than the runner's glibc.
     runs-on: ubuntu-22.04
-    container:
-      image: almalinux:9
     steps:
-      # We are root in the container, so no sudo. git must be installed before checkout.
-      # (curl is already present as curl-minimal; installing "curl" would conflict with it.)
-      - name: Base tools
-        run: |
-          dnf -y install --setopt=install_weak_deps=False \
-            ca-certificates git wget file binutils tar gzip findutils which
-
       - uses: actions/checkout@v4
 
-      # actions/setup-python does not put python/pip on PATH reliably inside a container,
-      # so Python 3.11 comes from uv (standalone build, glibc 2.17 baseline) in a venv
-      - name: Python 3.11
-        shell: bash
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          export PATH="$HOME/.local/bin:$PATH"
-          uv venv --seed --python 3.11 "$GITHUB_WORKSPACE/.venv"
-          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-          "$GITHUB_WORKSPACE/.venv/bin/python" --version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: System dependencies
         run: |
-          dnf -y install --setopt=install_weak_deps=False \
-            xcb-util-cursor xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm \
-            libxcb libxkbcommon libxkbcommon-x11 mesa-libEGL mesa-libGL libglvnd-glx \
-            dbus-libs fontconfig glib2 dejavu-sans-fonts
+          sudo apt-get update
+          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libegl1 libfuse2 file wget binutils \
+            libgl1 libxkbcommon0 libdbus-1-3
 
       - name: Python dependencies
         run: pip install PyQt6 pyinstaller
@@ -66,14 +46,22 @@ jobs:
         run: |
           QT_QPA_PLATFORM=offscreen python - <<'PY'
           from PyQt6.QtWidgets import QApplication
-          from PyQt6.QtGui import QImage, QPainter, QColor, QFont
+          from PyQt6.QtGui import QImage, QPainter, QColor, QFont, QFontMetricsF
           from PyQt6.QtCore import Qt, QRectF
           app = QApplication([])
-          img = QImage(256, 256, QImage.Format.Format_ARGB32); img.fill(Qt.GlobalColor.transparent)
-          p = QPainter(img); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-          p.setBrush(QColor("#1e1e1e")); p.setPen(QColor("#3daee9")); p.drawRoundedRect(QRectF(8, 8, 240, 240), 40, 40)
-          p.setFont(QFont("Monospace", 72, QFont.Weight.Bold)); p.setPen(QColor("#3daee9"))
-          p.drawText(QRectF(0, 0, 256, 256), Qt.AlignmentFlag.AlignCenter, "FS>_"); p.end()
+          S, TEXT, ACC = 256, "FS>_", QColor("#3daee9")
+          img = QImage(S, S, QImage.Format.Format_ARGB32); img.fill(Qt.GlobalColor.transparent)
+          p = QPainter(img); p.setRenderHint(QPainter.RenderHint.Antialiasing); p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+          p.setBrush(QColor("#1e1e1e")); p.setPen(ACC); p.drawRoundedRect(QRectF(8, 8, 240, 240), 40, 40)
+          f = QFont("Monospace"); f.setStyleHint(QFont.StyleHint.Monospace); f.setBold(True)
+          size = 80
+          while size > 10:                                   # shrink until the whole text fits inside the box with a margin
+              f.setPointSizeF(size); r = QFontMetricsF(f).tightBoundingRect(TEXT)
+              if r.width() <= 168 and r.height() <= 168: break
+              size -= 1
+          p.setFont(f); p.setPen(ACC)
+          r = QFontMetricsF(f).tightBoundingRect(TEXT)       # centre the ink, not the font box
+          p.drawText(int(S / 2 - r.width() / 2 - r.left()), int(S / 2 - r.height() / 2 - r.top()), TEXT); p.end()
           img.save("fetchstudio.png")
           PY
 
@@ -81,44 +69,32 @@ jobs:
         run: |
           pyinstaller --noconfirm --onedir --name fetchstudio \
             --add-data "fetchstudio/helper:fetchstudio/helper" run.py
-          # AlmaLinux's libgcc_s.so.1 references a glibc 2.35 symbol, which breaks the 2.34 floor.
-          # Every Linux system has its own libgcc_s, so the bundled copy is dropped and the
-          # system one is used instead.
-          rm -f dist/fetchstudio/_internal/libgcc_s.so.1
 
-      - name: Verify the bundle needs glibc 2.34 or older
-        shell: bash
+      - name: Report the glibc the bundle needs
+        env:
+          # ubuntu-22.04 builds against glibc 2.35, so that is the oldest system the AppImage can run on.
+          # To support 2.34 or older, build inside an older base image instead (e.g. a container: on this job).
+          MAX_GLIBC: "2.35"
         run: |
-          # GitHub runs bash with -e and pipefail; grep returning "no match" on a library
-          # without glibc symbols would silently kill this step, so switch both off here.
-          set +e +o pipefail
           echo "Build host: $(ldd --version | head -1)"
-          LIMIT=2.34
-          MAX=""
-          OFFENDERS=""
-          while IFS= read -r f; do
-            file -b "$f" | grep -q '^ELF' || continue
+          find dist/fetchstudio -type f -exec sh -c 'file -b "$1" | grep -q "^ELF"' _ {} \; -print > elf.txt
+          : > need.txt
+          while read -r f; do
             v=$(objdump -T "$f" 2>/dev/null | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//' | sort -Vu | tail -1)
-            [ -n "$v" ] || continue
-            MAX=$(printf '%s\n%s\n' "${MAX:-0}" "$v" | sort -V | tail -1)
-            if [ "$(printf '%s\n%s\n' "$v" "$LIMIT" | sort -V | tail -1)" != "$LIMIT" ]; then
-              OFFENDERS="${OFFENDERS}${v}  ${f}"$'\n'
-            fi
-          done < <(find dist/fetchstudio -type f)
-          echo "Highest glibc symbol version required by the bundle: ${MAX:-none}"
-          [ -n "$MAX" ] || { echo "::error::No glibc symbols found in the bundle (is dist/fetchstudio empty?)"; exit 1; }
-          if [ -n "$OFFENDERS" ]; then
-            echo "Files that need glibc newer than $LIMIT:"
-            printf '%s' "$OFFENDERS"
-            echo "::error::The bundle needs glibc $MAX, newer than the supported $LIMIT"
-            exit 1
-          fi
+            [ -n "$v" ] && echo "$v $f" >> need.txt
+          done < elf.txt
+          sort -V need.txt | tail -8 | sed 's/^/  needs glibc /'
+          MAX=$(sort -V need.txt | tail -1 | cut -d' ' -f1)
+          echo "Highest glibc required by the bundle: ${MAX:-none}"
+          test -n "$MAX"
+          test "$(printf '%s\n%s\n' "$MAX" "$MAX_GLIBC" | sort -V | tail -1)" = "$MAX_GLIBC" \
+            || { echo "::error::The bundle needs glibc $MAX, newer than the allowed $MAX_GLIBC"; exit 1; }
 
       - name: Assemble AppDir
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/lib
           cp -r dist/fetchstudio/* AppDir/usr/bin/
-          cp /usr/lib64/libxcb-cursor.so.0* AppDir/usr/lib/
+          cp /usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0* AppDir/usr/lib/
           cp fetchstudio.png AppDir/fetchstudio.png
           cat > AppDir/fetchstudio.desktop <<DESK
           [Desktop Entry]
