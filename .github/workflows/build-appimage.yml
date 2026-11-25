@@ -120,27 +120,22 @@ jobs:
         run: |
           QT_QPA_PLATFORM=offscreen ./AppDir/AppRun --version
           QT_QPA_PLATFORM=offscreen ./AppDir/AppRun --extract-helper "$RUNNER_TEMP/helper"
-          test -f "$RUNNER_TEMP/helper/fetchstudio-cal-helper"
+          test -f "$RUNNER_TEMP/helper/fetchstudio-cal-helper" && test -f "$RUNNER_TEMP/helper/io.github.bobbycomet.fetchstudio.policy"   # helper is inside the AppImage
 
       - name: Build AppImage
         run: |
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
           ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir FetchStudio-x86_64.AppImage
-          tar czf fetchstudio-helper.tar.gz -C fetchstudio/helper .
 
       - uses: actions/upload-artifact@v4
         with:
           name: FetchStudio-${{ steps.ver.outputs.version }}-x86_64.AppImage
-          path: |
-            FetchStudio-x86_64.AppImage
-            fetchstudio-helper.tar.gz
+          path: FetchStudio-x86_64.AppImage
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           # the asset name stays FetchStudio-x86_64.AppImage so Griffin Updater keeps finding it
-          files: |
-            FetchStudio-x86_64.AppImage
-            fetchstudio-helper.tar.gz
+          files: FetchStudio-x86_64.AppImage
