@@ -85,6 +85,9 @@ jobs:
       - name: Verify the bundle needs glibc 2.34 or older
         shell: bash
         run: |
+          # GitHub runs bash with -e and pipefail; grep returning "no match" on a library
+          # without glibc symbols would silently kill this step, so switch both off here.
+          set +e +o pipefail
           echo "Build host: $(ldd --version | head -1)"
           LIMIT=2.34
           MAX=""
@@ -99,7 +102,7 @@ jobs:
             fi
           done < <(find dist/fetchstudio -type f)
           echo "Highest glibc symbol version required by the bundle: ${MAX:-none}"
-          test -n "$MAX"
+          [ -n "$MAX" ] || { echo "::error::No glibc symbols found in the bundle (is dist/fetchstudio empty?)"; exit 1; }
           if [ -n "$OFFENDERS" ]; then
             echo "Files that need glibc newer than $LIMIT:"
             printf '%s' "$OFFENDERS"
