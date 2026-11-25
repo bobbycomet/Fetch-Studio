@@ -82,7 +82,7 @@ Six Info readouts are **groups with tick boxes**, so one node can show a single 
 | Group | Items you can tick |
 |-------|--------------------|
 | **Environment** | Weather conditions, temperature, location, sunrise, sunset (optional; works offline) |
-| **Clock** | Local time, date, time zone, week number, calendar (needs cal) |
+| **Clock** | Local time, date, time zone, week number, calendar (needs [cal](https://github.com/bobbycomet/Fetch-Studio/wiki/Node-Reference#clock)) |
 | **Storage** | Filesystem type, mount point, SSD/HDD/NVMe, drive model, drive temperature, read/write totals, total available storage |
 | **Network** | Active interface, connection type, Wi-Fi SSID, link speed, public IP, VPN status, download/upload throughput |
 | **Hardware** | CPU architecture, microcode, RAM type and speed, motherboard, GPU driver and version, VRAM, PCI device count |
