@@ -116,7 +116,7 @@ Select a node and its settings appear in tabs on the right (for an Info node: **
 **Remove** deletes the hooks and the script. The generated script is plain bash; it reads system information and runs only the custom commands you trusted. The app does not need to be running.
 
 ### Calendar and the `cal` helper
-The Clock readout's **Calendar** item needs the `cal` command. If it is missing, the Info node's **Items** tab offers **Install cal…**. With the optional polkit helper installed, Fetch Studio installs it through `pkexec` (administrator password prompt) using the distribution's own package manager; without it, the app shows the right command for your distribution:
+The Clock readout's **Calendar** item needs the `cal` command. If it is missing, the Info node's **Items** tab offers **Install cal…**, which opens **Settings**. With the optional polkit helper, Fetch Studio installs it through `pkexec` (administrator password prompt) using the distribution's own package manager; without it, the app shows the right command for your distribution:
 
 | Distribution | Command |
 |---|---|
@@ -125,22 +125,13 @@ The Clock readout's **Calendar** item needs the `cal` command. If it is missing,
 | Arch Linux, Manjaro, EndeavourOS | `sudo pacman -S util-linux` |
 | openSUSE Tumbleweed and Leap | `sudo zypper install util-linux` |
 
-One-time helper setup: `./FetchStudio-x86_64.AppImage --extract-helper`, then `cd ~/fetchstudio-helper && sudo sh install-helper.sh` (or download `fetchstudio-helper.tar.gz` from the release). Remove it with `sudo sh install-helper.sh --uninstall`. The helper accepts only the argument `install`, takes no package names from the caller and runs only the distribution's package manager for one fixed package.
+Everything is opt-in and lives in **Settings** (toolbar):
 
-### Saving and safety
-* Auto-save every 10 minutes, **Ctrl+S** to save, and a Save / Discard / Cancel prompt when you exit or start/open/import another project with unsaved changes.
-* Controls: left-drag pans, Shift+left-drag box-selects, right-click opens options (add node, group, collapse/expand, delete), scroll moves up/down, Ctrl+scroll zooms, double-click a group to collapse it.
+1. **Set up helper…** asks for confirmation, then for your administrator password once (polkit). It installs a small root-owned helper that can do only two things: install `cal` and remove it again.
+2. Once the helper is installed, **Install cal** appears (if `cal` is missing), plus **Remove helper**, and **Uninstall cal** when it applies.
+3. **Uninstall cal** is only offered on Debian-family systems (where `cal` is its own package, `ncal`) and only if Fetch Studio installed it. On Fedora, Arch and openSUSE `cal` is part of `util-linux`, a core package that is never removed.
 
-### Interactive lesson
-First launch starts a guided lesson that highlights the part of the window you need and only lets you continue when the step is done. Progress is saved; press **F1** or **Lesson** to resume or restart.
-
----
-
-## Terminals
-
-The result is printed by your shell, so it works in any terminal: GNOME Terminal, Console (`kgx`), Konsole, Xfce Terminal,
-MATE Terminal, QTerminal, LXTerminal, Tilix, Deepin Terminal, COSMIC Terminal, Pantheon Terminal and others. The preview's terminal selector changes the window title and font size only.
-Writing each terminal's own profile settings (fonts/palettes) is not implemented yet.
+Without `pkexec`, Settings shows the command for your distribution instead. The helper is written by the app itself through `pkexec`, so nothing has to be unpacked or run by hand. Prefer the command line? `./FetchStudio-x86_64.AppImage --extract-helper` copies the files and `sudo sh install-helper.sh` installs them (`--uninstall` removes them).
 
 ## Security
 
@@ -158,7 +149,7 @@ See the [Security wiki page](https://github.com/bobbycomet/Fetch-Studio/wiki/Sec
 ## Requirements and building
 
 * Linux with bash, Python 3.9+ and PyQt6 (`pip install PyQt6`), then `python3 run.py` (or `python3 -m fetchstudio`).
-* Released as an AppImage (version 2.0.0). `.github/workflows/build-appimage.yml` (tag `v*` or run manually) runs the tests, builds on glibc 2.35 and fails if the bundle needs anything newer than **glibc 2.34**.
+* Released as an AppImage (version 2.0.0). `.github/workflows/build-appimage.yml` (tag `v*` or run manually) runs the tests, builds on glibc 2.35 and reports the glibc the bundle needs and fails if it exceeds 2.35 (the build host's version; the AppImage runs on glibc 2.35 or newer).
 * Run the tests with `QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests`.
 
 ### Source layout
