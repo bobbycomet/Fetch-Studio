@@ -23,13 +23,20 @@ jobs:
       - name: Base tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates git wget file binutils tar gzip
+          apt-get install -y --no-install-recommends ca-certificates curl git wget file binutils tar gzip
 
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # actions/setup-python does not put python/pip on PATH reliably inside a container,
+      # so Python 3.11 comes from uv (standalone build, glibc 2.17 baseline) in a venv
+      - name: Python 3.11
+        shell: bash
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv --seed --python 3.11 "$GITHUB_WORKSPACE/.venv"
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/.venv/bin/python" --version
 
       - name: System dependencies
         run: |
