@@ -31,11 +31,12 @@ fighting alignment by hand. Most people just want to say *"show my OS and RAM, p
 
 ---
 
-## How fast and acurrate is it? 
+## How fast and accurate is it? 
 
 - 1:1 what you see is what you get live preview
 - Once you set it up the way you want, build takes 5 seconds or less, once you hit build, it will be ready by the time you open your terminal
 - Terminal opens with the system info and artwork almost immediately
+- Slow hardware-identity lookups (GPU model, driver, RAM, PCI count...) are cached until reboot, and internet items (weather, public IP) are cached and refreshed in the background, so they never slow a new terminal. Live values such as CPU frequency and temperatures are always read fresh
 
 ---
 
@@ -48,9 +49,9 @@ Every design has one **Output** node. Everything you want on screen is a node co
 | **Logo** | Built-in ASCII, your own text file, or an image/GIF, with optional gradient and animation |
 | **Custom Logo** | A logo you drew in the ASCII Designer (or imported as `.fsnode`) |
 | **Title** | `user@host` line, with optional underline |
-| **Info** | One readout: OS, Host, Kernel, Uptime, Packages, Shell, DE, Session, Terminal (the terminal emulator, never the file manager that launched it), CPU, GPU, Memory, Disk, Swap, Load, Battery, LocalIP, Resolution, Locale, or a **Custom** command |
-| **Meter bar** *(modern)* | A colored usage bar for Memory, Disk, CPU load, Swap or Battery |
-| **Divider** *(modern)* | A line (optionally labeled, optionally gradient) to separate sections |
+| **Info** | One readout: OS, Host, Kernel, Uptime, Packages, Shell, DE, Session, Terminal (the terminal emulator, never the file manager that launched it), CPU, GPU, Memory, Disk, Swap, Load, Battery, LocalIP, Resolution, Locale, Weather, or a **Custom** command. Or pick a **grouped readout** (Environment, Clock, Storage, Network, Hardware, Services) and tick the items you want |
+| **Meter bar** | Colored usage bars: tick any of Memory, Disk, CPU load, Swap, Battery, CPU frequency, GPU, Net download or Net upload, and each gets its own bar |
+| **Divider** | A line (optionally labeled, optionally gradient) to separate sections |
 | **Color bar** | The classic row(s) of terminal palette blocks |
 | **Text** | Any line of text you type |
 
@@ -75,10 +76,27 @@ printed first, the next one down second, and so on. If two nodes sit at the same
 * **Classic mode** (toolbar toggle, saved per project): only ASCII art and system readouts. Gradients, animation, meters and dividers are hidden and ignored at build time.
 * **Color themes**: Dracula, Nord, Gruvbox, Catppuccin, Tokyo Night. One click recolors the whole graph.
 
+### Grouped readouts
+Six Info readouts are **groups with tick boxes**, so one node can show a single item or a whole section, and nothing you leave unticked is ever read:
+
+| Group | Items you can tick |
+|-------|--------------------|
+| **Environment** | Weather conditions, temperature, location, sunrise, sunset (optional; works offline) |
+| **Clock** | Local time, date, time zone, week number, calendar (needs cal) |
+| **Storage** | Filesystem type, mount point, SSD/HDD/NVMe, drive model, drive temperature, read/write totals, total available storage |
+| **Network** | Active interface, connection type, Wi-Fi SSID, link speed, public IP, VPN status, download/upload throughput |
+| **Hardware** | CPU architecture, microcode, RAM type and speed, motherboard, GPU driver and version, VRAM, PCI device count |
+| **Services** | Init system version, running and failed service counts, active targets, uptime, boot time |
+
+Choose **stacked** (a line per item) or **inline** (one line), and show or hide the item names. Position on the canvas still sets the order, so you can
+section things off with several nodes and Dividers. Live metrics (CPU frequency, GPU use, network throughput) are **Meter bar** options.
+Fetch Studio is a fetch tool, not a system monitor, so values are read once when the terminal opens. Details, examples and what each item needs are in the
+[Node Reference](https://github.com/bobbycomet/Fetch-Studio/wiki/Node-Reference).
+
 ### Logos, gradients and animation
 * Gradients: horizontal, vertical, diagonal, radial.
 * Animations: rainbow, scroll, pulse, wave, typewriter, sparkle, scanline.
-* Images and GIFs are converted to half-block color art. Set **Image width** (up to 200 columns) for more detail. You can now, as of 1.3.0 use kitty, iterm, and sixel for better image quality.
+* Images and GIFs are converted to half-block color art. Set **Image width** (up to 200 columns) for more detail. You can now, as of 1.3.0+ use kitty, iterm, and sixel for better image quality.
 * **Animation lifetime** (Output node):
 
 | Mode | Behaviour |
