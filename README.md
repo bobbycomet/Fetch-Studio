@@ -4,7 +4,9 @@
 
 # Fetch Studio
 
-**Design your terminal's system-info screen (neofetch / fastfetch style) by connecting boxes. No code, no config files.**
+**Design your terminal's system-info screen (neofetch / fastfetch style) by connecting boxes. No code, no config files.** 
+
+**Build your terminal greeting visually: 9 nodes, 66 pick-and-choose readouts, and zero config files to hand-edit. Just rebuild the project to overwrite when you add or remove anything.**
 
 Fetch Studio is a desktop app (PyQt6) where you build the look of your terminal greeting on a node graph and watch a
 1:1 live terminal preview update as you go. When you press **Build**, it installs a small standalone script and hooks it into
