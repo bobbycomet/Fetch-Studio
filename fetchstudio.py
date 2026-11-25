@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fetch Studio - node-based neofetch/fastfetch designer with a 1:1 terminal preview (PyQt6)."""
-import sys, os, re, json, shutil, zipfile, platform, subprocess, threading, uuid, copy, random, math, base64, shlex
+import sys, os, re, json, shutil, zipfile, platform, subprocess, threading, uuid, copy, random, math, base64, shlex, hashlib
 from pathlib import Path
 from PyQt6.QtCore import (Qt, QTimer, QPointF, QRectF, QRect, QSize, QSettings, QMimeData, pyqtSignal,
                           QBuffer, QByteArray, QIODevice)
@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QListWidget, QListWidgetItem, QButtonGroup)
 
 APP = "Fetch Studio"
-VERSION = "1.3.0"          # keep in sync with the GitHub release tag (v1.3.0 -> "1.3.0")
+VERSION = "1.4.0"          
 GH_REPO = "bobbycomet/Fetch-Studio"
 RELEASES_URL = "https://github.com/%s/releases" % GH_REPO
 UPDATER_URL = "https://github.com/bobbycomet/GriffinUpdater"
@@ -41,16 +41,48 @@ class Par:
 P = Par
 FIELDS = ["OS", "Host", "Board", "BIOS", "Chassis", "Kernel", "Init", "Uptime", "Packages", "Shell", "DE", "Session", "Terminal",
           "CPU", "CPUTemp", "GPU", "GPUTemp", "Fans", "SuperIO", "Memory", "Swap", "Disk", "Load", "Procs", "Battery",
-          "LocalIP", "Resolution", "Locale", "Weather", "Custom"]
+          "LocalIP", "Resolution", "Locale", "Weather", "Environment", "Clock", "Storage", "Network", "Hardware", "Services", "Custom"]
 FIELD_LABELS = {"Board": "Motherboard", "BIOS": "BIOS", "Chassis": "Chassis (desktop/laptop)", "Init": "Init system", "CPUTemp": "CPU Temp",
                 "GPUTemp": "GPU Temp", "Fans": "Fan Speed (case fans)", "SuperIO": "Super I/O chip", "Procs": "Processes",
-                "LocalIP": "Local IP", "DE": "DE", "Weather": "Weather (needs internet)", "Custom": "Custom command"}
+                "LocalIP": "Local IP", "DE": "DE", "Weather": "Weather (needs internet)", "Custom": "Custom command",
+                "Environment": "▸ Environment (weather, sunrise…)", "Clock": "▸ Clock & date (pick items)", "Storage": "▸ Storage (pick items)",
+                "Network": "▸ Network (pick items)", "Hardware": "▸ Hardware (pick items)", "Services": "▸ Services (pick items)"}
 SHORT_LABELS = {"Board": "Motherboard", "Chassis": "Chassis", "Init": "Init", "CPUTemp": "CPU Temp", "GPUTemp": "GPU Temp",
                 "Fans": "Fans", "SuperIO": "Super I/O", "Procs": "Processes", "LocalIP": "Local IP"}   # default on-screen label
+# Grouped readouts: ONE Info node, pick any sub-options with tick boxes. (key in SH, menu text, on-screen name)
+GROUPS = {
+    "Environment": [("Wx_Cond", "Weather conditions", "Weather"), ("Wx_Temp", "Temperature", "Temperature"), ("Wx_Loc", "Location", "Location"),
+                    ("Wx_Rise", "Sunrise", "Sunrise"), ("Wx_Set", "Sunset", "Sunset")],
+    "Clock": [("Clock_Time", "Local time", "Time"), ("Clock_Date", "Date", "Date"), ("Clock_TZ", "Time zone", "Time zone"),
+              ("Clock_Week", "Week number", "Week"), ("Cal", "Calendar (month grid, 8 lines)", "Calendar")],
+    "Storage": [("Stor_FS", "Filesystem type", "Filesystem"), ("Stor_Mount", "Mount point (root drive)", "Mount"),
+                ("Stor_Type", "SSD / HDD / NVMe", "Drive type"), ("Stor_Model", "Drive model (NVMe included)", "Drive"),
+                ("Stor_Temp", "Drive temperature", "Drive Temp"), ("Stor_IO", "Read / write totals since boot", "Disk I/O"),
+                ("Stor_Total", "Total available storage", "Storage")],
+    "Network": [("Net_If", "Active interface", "Interface"), ("Net_Type", "Connection type (Ethernet / Wi-Fi / VPN)", "Connection"),
+                ("Net_SSID", "Wi-Fi SSID", "SSID"), ("Net_Speed", "Link speed", "Link speed"), ("Net_Public", "Public IP (internet)", "Public IP"),
+                ("Net_VPN", "VPN status", "VPN"), ("Net_Rate", "Download / upload throughput (~0.2 s sample)", "Throughput")],
+    "Hardware": [("HW_Arch", "CPU architecture", "Arch"), ("HW_Microcode", "CPU microcode version", "Microcode"),
+                 ("HW_RAM", "RAM type and speed (needs DMI access)", "RAM"), ("Board", "Motherboard", "Motherboard"),
+                 ("HW_Driver", "GPU driver (and version)", "GPU driver"), ("HW_VRAM", "GPU VRAM", "VRAM"), ("HW_PCI", "PCI device count", "PCI devices")],
+    "Services": [("Svc_Init", "Init system version", "Init"), ("Svc_Running", "Running service count", "Running services"),
+                 ("Svc_Failed", "Failed service count", "Failed services"), ("Svc_Targets", "Active system targets", "Targets"),
+                 ("Uptime", "Uptime", "Uptime"), ("Svc_Boot", "Booted at (last boot)", "Booted")]}
+GROUP_LABEL = {"Environment": "Env", "Clock": "Clock", "Storage": "Storage", "Network": "Network", "Hardware": "Hardware", "Services": "Services"}
+GROUP_DEFAULT = {"Environment": ["Wx_Cond", "Wx_Temp"], "Clock": ["Clock_Time", "Clock_Date"], "Storage": ["Stor_Type", "Stor_Total"],
+                 "Network": ["Net_If", "Net_Type", "Net_Public"], "Hardware": ["HW_Arch", "HW_RAM"], "Services": ["Svc_Running", "Svc_Failed"]}
+GROUP_KEYS = tuple(GROUPS)
+PLAIN_FIELDS = tuple(f for f in FIELDS if f not in GROUPS)
+
+# Data that never changes while the machine is up is cached on disk until reboot (0); slow-but-changing data for N minutes.
+# Everything NOT listed here (CPU frequency, load, GPU use, temperatures, throughput, clock...) is read live every time.
+CLASS = {"GPU": 0, "HW_Microcode": 0, "HW_RAM": 0, "HW_Driver": 0, "HW_VRAM": 0, "HW_PCI": 0, "Svc_Init": 0,
+         "Stor_Type": 0, "Stor_Model": 0, "Svc_Running": 1, "Svc_Failed": 1, "Svc_Targets": 1, "Net_SSID": 1}
 def san(t): return str(t).replace("{{", "{ {")        # user text can never inject internal {{tokens}}
 ANIMS = ["none", "rainbow", "scroll", "pulse", "wave", "typewriter", "sparkle", "scanline"]
 GRADS = ["none", "horizontal", "vertical", "diagonal", "radial"]
-METRICS = {"Memory": "PCT_Memory", "Disk": "PCT_Disk", "CPU load": "PCT_CPU", "Swap": "PCT_Swap", "Battery": "PCT_Battery"}
+METRICS = {"Memory": "PCT_Memory", "Disk": "PCT_Disk", "CPU load": "PCT_CPU", "Swap": "PCT_Swap", "Battery": "PCT_Battery",
+           "CPU frequency": "PCT_CPUFreq", "GPU": "PCT_GPU", "Net download": "PCT_NetDown", "Net upload": "PCT_NetUp"}
 BARCH = {"blocks": ("█", "░"), "dots": ("●", "○"), "lines": ("━", "─"), "ascii": ("#", "-")}
 FANCY_NODES = {"bar", "divider"}          # hidden in classic mode
 THEMES = {
@@ -85,13 +117,17 @@ SPEC = {
     "title": ("Title", "#27ae60", [P("color", "Color", "color", "#3daee9"), P("underline", "Underline", "check", True)]),
     "info": ("Info", "#8e44ad", [
         P("field", "Readout", "fieldlist", "OS", FIELDS), P("label", "Label (blank = default)", "text", ""),
-        P("override", "Show this text instead of the real value (display only; your system is NOT changed)", "text", ""),
-        P("location", "Weather location (blank = auto by IP)", "text", "", None, False, ("field", "Weather")),
-        P("units", "Weather units", "combo", "auto", ["auto", "metric", "imperial"], False, ("field", "Weather")),
+        P("items", "Show (tick what you want; only ticked items appear)", "groupitems", [], None, False, ("field", GROUP_KEYS)),
+        P("layout", "Layout: stacked = one line per item, inline = one line", "combo", "stacked", ["stacked", "inline"], False, ("field", GROUP_KEYS)),
+        P("names", "Show item names", "check", True, None, False, ("field", GROUP_KEYS)),
+        P("override", "Show this text instead of the real value (display only; your system is NOT changed)", "text", "", None, False, ("field", PLAIN_FIELDS)),
+        P("location", "Weather location (blank = auto by IP)", "text", "", None, False, ("field", ("Weather", "Environment"))),
+        P("units", "Weather units", "combo", "auto", ["auto", "metric", "imperial"], False, ("field", ("Weather", "Environment"))),
         P("command", "Command to run", "text", "echo hello", None, False, ("field", "Custom")),
         P("key_color", "Label color", "color", "#3daee9"), P("val_color", "Value color", "color", "#d0d0d0")]),
     "bar": ("Meter bar", "#1abc9c", [
-        P("metric", "Metric", "combo", "Memory", list(METRICS)), P("label", "Label (blank = metric)", "text", ""),
+        P("metrics", "Meters (tick one or more; each gets its own bar)", "multi", ["Memory"], list(METRICS)),
+        P("label", "Label (blank = meter name; used when one meter is ticked)", "text", ""),
         P("width", "Bar width", "int", 16, (6, 40)), P("style", "Style", "combo", "blocks", list(BARCH)),
         P("key_color", "Label color", "color", "#3daee9"), P("c1", "Low color", "color", "#2ecc71"),
         P("c2", "Mid color", "color", "#f1c40f"), P("c3", "High color", "color", "#e74c3c"),
@@ -193,16 +229,116 @@ if [ "$c" = init ] || [ -z "$c" ]; then if [ -d /run/openrc ]; then c=OpenRC; el
     "PCT_Swap": r"""free | awk '/Swap:/{if($2>0)printf "%d",$3*100/$2; else print 0}'""",
     "PCT_Battery": r"""for b in /sys/class/power_supply/BAT*; do [ -r "$b/capacity" ] && { cat "$b/capacity"; break; }; done"""}
 
-def weather_snippet(loc, units):
-    """wttr.in lookup, cached 30 min so terminals never wait on the network (first run waits <=3 s once)."""
-    import hashlib; from urllib.parse import quote
-    q = quote(loc.strip()); u = {"metric": "&m", "imperial": "&u"}.get(units, "")
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "fetchstudio"
+
+NET_TPL = r'''f="${XDG_CACHE_HOME:-$HOME/.cache}/fetchstudio/@TAG@"; mkdir -p "${f%/*}" 2>/dev/null
+fetch(){ @FETCH@; }
+failed(){ [ -e "$f.fail" ] && [ -z "$(find "$f.fail" -mmin +10 2>/dev/null)" ]; }
+store(){ r=$(fetch); if [ -n "$r" ]; then printf '%s' "$r" > "$f"; rm -f "$f.fail"; else : > "$f.fail"; fi; }
+if [ ! -s "$f" ]; then failed || store
+elif [ -n "$(find "$f" -mmin +@TTL@ 2>/dev/null)" ] && ! failed; then ( store ) >/dev/null 2>&1 & fi
+cat "$f" 2>/dev/null || echo n/a'''
+
+def cached_net(tag, fetch, ttl=30):
+    """Internet lookups. Cached on disk for ttl minutes; a stale value is shown instantly while a background refresh runs;
+    after a failed lookup the network is not tried again for 10 minutes, so being offline never costs a wait on every new terminal
+    (only the very first lookup can wait, at most 3 s). Offline with nothing cached shows n/a."""
+    return NET_TPL.replace("@TAG@", tag).replace("@FETCH@", fetch).replace("@TTL@", str(ttl))
+
+def wx_url(loc, units):
+    from urllib.parse import quote
+    u = {"metric": "&m", "imperial": "&u"}.get(units, "")
+    return "https://wttr.in/%s?format=%%C%%7C%%t%%7C%%l%%7C%%S%%7C%%s%s" % (quote(loc.strip()), u)   # one request: cond|temp|place|sunrise|sunset
+
+WX_AWK = {"Weather": '{print $1" "$2}', "Wx_Cond": "{print $1}", "Wx_Temp": "{print $2}", "Wx_Loc": "{print $3}",
+          "Wx_Rise": "{print substr($4,1,5)}", "Wx_Set": "{print substr($5,1,5)}"}
+def weather_item(loc, units, key):
+    """Every weather item reads the same cached wttr.in answer, so any number of them costs one request per 30 minutes."""
     h = hashlib.md5((loc + units).encode()).hexdigest()[:8]
-    return ('f="${XDG_CACHE_HOME:-$HOME/.cache}/fetchstudio/weather_%s"; mkdir -p "${f%%/*}" 2>/dev/null\n'
-            'fetch(){ curl -fsS -m 3 "https://wttr.in/%s?format=%%C+%%t%s" 2>/dev/null | head -c 80; }\n'
-            'if [ ! -s "$f" ]; then r=$(fetch); [ -n "$r" ] && printf \'%%s\' "$r" > "$f"\n'
-            'elif [ -n "$(find "$f" -mmin +30 2>/dev/null)" ]; then ( r=$(fetch); [ -n "$r" ] && printf \'%%s\' "$r" > "$f" ) >/dev/null 2>&1 & fi\n'
-            'cat "$f" 2>/dev/null || echo n/a') % (h, q, u)
+    fetch = 'r=$(curl -fsS -m 3 "' + wx_url(loc, units) + '" 2>/dev/null | head -c 200); case $r in *"|"*"|"*"|"*"|"*) printf "%s" "$r";; esac'
+    awk = WX_AWK[key]
+    if key == "Wx_Loc" and loc.strip(): awk = "{print ($3!=\"\"?$3:l)}"
+    av = " -v l=" + shlex.quote(loc.strip()) if key == "Wx_Loc" and loc.strip() else ""
+    return ("w=$(\n" + cached_net("wx_" + h, fetch) + "\n)\n"
+            "case \"$w\" in n/a|\"\") echo n/a;; *) printf '%s' \"$w\" | awk -F'|'" + av + " '" + awk + "';; esac")
+
+HUM = r'''function h(b,  i,u,f){split("B KiB MiB GiB TiB PiB",u," ");i=1;while(b>=1024&&i<6){b/=1024;i++};f=(i>2)?"%.1f %s":"%.0f %s";return sprintf(f,b,u[i])}'''
+ROOTDISK = r'''src=$(findmnt -no SOURCE / 2>/dev/null | head -1); src=${src%%\[*}
+dk=$(lsblk -nrs -o NAME,TYPE "$src" 2>/dev/null | awk '$2=="disk"{print $1; exit}')
+'''
+NETIF = r'''ifc=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
+'''
+NETRATE = NETIF + r'''st="${XDG_CACHE_HOME:-$HOME/.cache}/fetchstudio/netrate"; mkdir -p "${st%/*}" 2>/dev/null   # one 0.2 s sample, shared for 2 s by every net item
+read -r t _ < /proc/uptime; pi=; pt=0; dr=; dx=
+[ -r "$st" ] && read -r pi pt dr dx < "$st"
+if [ -n "$ifc" ] && { [ "$pi" != "$ifc" ] || ! awk -v a="$t" -v b="$pt" 'BEGIN{exit !(a>=b && a-b<2)}'; }; then
+  read -r r1 x1 < <(awk -v i="$ifc" '{sub(":"," ")} $1==i{print $2,$10}' /proc/net/dev); sleep 0.2
+  read -r r2 x2 < <(awk -v i="$ifc" '{sub(":"," ")} $1==i{print $2,$10}' /proc/net/dev)
+  read -r dr dx < <(awk -v a="${r1:-0}" -v b="${r2:-0}" -v c="${x1:-0}" -v d="${x2:-0}" 'BEGIN{printf "%d %d",(b-a)*5,(d-c)*5}')
+  read -r t _ < /proc/uptime; printf '%s %s %s %s\n' "$ifc" "$t" "$dr" "$dx" > "$st" 2>/dev/null
+fi
+'''
+NETSPEED = r'''if [ -d /sys/class/net/$ifc/wireless ]; then sp=$(iw dev "$ifc" link 2>/dev/null | awk '/@DIR@ bitrate/{printf "%d",$3; exit}'); else sp=$(cat /sys/class/net/$ifc/speed 2>/dev/null); fi
+[ "${sp:-0}" -gt 0 ] 2>/dev/null && [ -n "$@VAR@" ] && awk -v r="$@VAR@" -v s="$sp" 'BEGIN{p=r*8/(s*1000000)*100; if(p>100)p=100; printf "%d",p}'
+'''
+
+SH.update({
+    "Weather": weather_item("", "auto", "Weather"),
+    **{k: weather_item("", "auto", k) for k in ("Wx_Cond", "Wx_Temp", "Wx_Loc", "Wx_Rise", "Wx_Set")},
+    # --- Clock (cheap, live)
+    "Clock_Time": "date +%H:%M", "Clock_Date": "date '+%a %d %b %Y'", "Clock_TZ": "date '+%Z (UTC%:z)'",
+    "Clock_Week": "echo $((10#$(date +%V)))",
+    **{"Cal%d" % i: "cal 2>/dev/null | sed -n '%dp' | grep . || echo ' '" % (i + 1) for i in range(8)},
+    # --- Storage (everything is about the drive that holds /)
+    "Stor_FS": "findmnt -no FSTYPE / 2>/dev/null | head -1",
+    "Stor_Mount": ROOTDISK + '[ -n "$src" ] && echo "/ ($src)"',
+    "Stor_Type": ROOTDISK + r'''case "$dk" in "") r="";; nvme*) r="NVMe SSD";; mmcblk*) r="eMMC / SD";; vd*|xvd*) r=Virtual;;
+  *) case "$(cat /sys/block/$dk/queue/rotational 2>/dev/null)" in 0) r=SSD;; 1) r=HDD;; *) r="";; esac;; esac; echo "$r"''',
+    "Stor_Model": ROOTDISK + r'''[ -n "$dk" ] && echo $(cat /sys/block/$dk/device/model 2>/dev/null)''',
+    "Stor_Temp": ROOTDISK + r"""t=$(cat /sys/block/$dk/device/hwmon*/temp1_input 2>/dev/null | head -1)
+[ -n "$t" ] && awk -v t="$t" 'BEGIN{printf "%.0f°C", t/1000}'""",
+    "Stor_IO": ROOTDISK + r'''awk -v d="$dk" '@HUM@ $3==d{R=$6*512;W=$10*512;f=1} END{if(f)printf "R %s / W %s (since boot)",h(R),h(W)}' /proc/diskstats'''.replace("@HUM@", HUM),
+    "Stor_Total": "df -lP -B1 -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x ramfs -x iso9660 2>/dev/null | awk '" + HUM +
+                  " NR>1 && !s[$1]++ {t+=$2;a+=$4} END{if(t)printf \"%s free of %s\",h(a),h(t)}'",
+    # --- Network (the interface that carries the default route)
+    "Net_If": NETIF + 'echo "$ifc"',
+    "Net_Type": NETIF + r'''n=$ifc; case $n in "") r="";; wg*|tun*|tap*|tailscale*|ppp*|nordlynx|proton*|mullvad*|zt*) r=VPN;;
+  *) if [ -d /sys/class/net/$n/wireless ]; then r=Wi-Fi; elif [ -d /sys/class/net/$n/bridge ]; then r=Bridge
+     elif [ "$(cat /sys/class/net/$n/type 2>/dev/null)" = 1 ]; then r=Ethernet; else r=""; fi;; esac; echo "$r"''',
+    "Net_SSID": NETIF + r'''s=""; if [ -d /sys/class/net/$ifc/wireless ]; then s=$(iwgetid -r 2>/dev/null)
+  [ -z "$s" ] && s=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2;exit}')
+  [ -z "$s" ] && s=$(iw dev "$ifc" link 2>/dev/null | awk -F': ' '/SSID/{print $2;exit}'); fi; echo "$s"''',
+    "Net_Speed": NETIF + r'''if [ -d /sys/class/net/$ifc/wireless ]; then v=$(iw dev "$ifc" link 2>/dev/null | awk '/tx bitrate/{print $3, $4; exit}')
+else sp=$(cat /sys/class/net/$ifc/speed 2>/dev/null); [ "${sp:-0}" -gt 0 ] 2>/dev/null && v="$sp Mb/s"; fi; echo "$v"''',
+    "Net_Public": 'w=$(\n' + cached_net("pubip", 'r=$(curl -fsS -m 3 https://api.ipify.org 2>/dev/null | head -c 64); case $r in ""|*[!0-9a-fA-F:.]*) ;; *) printf "%s" "$r";; esac') + '\n)\necho "$w"',
+    "Net_VPN": r'''command -v ip >/dev/null 2>&1 && { v=$(ip -o link show up 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' | grep -E '^(wg|tun|tap|tailscale|ppp|nordlynx|proton|mullvad|zt)' | head -1)
+  if [ -n "$v" ]; then echo "Active ($v)"; else echo Off; fi; }''',
+    "Net_Rate": NETRATE + '[ -n "$dr" ] && awk -v a="$dr" -v b="$dx" \'' + HUM + ' BEGIN{printf "↓ %s/s  ↑ %s/s",h(a),h(b)}\'',
+    # --- Hardware identity
+    "HW_Arch": "uname -m",
+    "HW_Microcode": r'''awk -F': ' '/^microcode/{print $2; exit}' /proc/cpuinfo''',
+    "HW_RAM": r"""command -v dmidecode >/dev/null 2>&1 && dmidecode -t 17 2>/dev/null | awk -F': ' '/^[ \t]*Type: /&&$2!~/Unknown|Other|Empty/{t=$2} /^[ \t]*Configured (Memory|Clock) Speed: /&&$2!~/Unknown/{s=$2} /^[ \t]*Speed: /&&$2!~/Unknown/&&!s2{s2=$2} END{if(t)print t, (s?s:s2)}'""",
+    "HW_Driver": r'''d=""; if command -v nvidia-smi >/dev/null 2>&1; then v=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1); [ -n "$v" ] && d="nvidia $v"; fi
+[ -z "$d" ] && d=$(lspci -k 2>/dev/null | awk '/^[^ \t]/{f=($0 ~ /VGA|3D controller|Display controller/)} f&&/Kernel driver in use:/{print $NF; exit}')
+echo "$d"''',
+    "HW_VRAM": r'''r=""; command -v nvidia-smi >/dev/null 2>&1 && r=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1)
+if [ -z "$r" ]; then for f in /sys/class/drm/card*/device/mem_info_vram_total; do [ -r "$f" ] || continue; b=$(cat "$f" 2>/dev/null)
+  if [ "${b:-0}" -gt 0 ] 2>/dev/null; then r=$(awk -v b="$b" 'BEGIN{printf "%.0f MiB", b/1048576}'); break; fi; done; fi; echo "$r"''',
+    "HW_PCI": "ls /sys/bus/pci/devices 2>/dev/null | wc -l",
+    # --- Services (systemd; other init systems show n/a for the counts)
+    "Svc_Init": r'''c=$(ps -p 1 -o comm= 2>/dev/null | tr -d ' '); case "$c" in systemd) systemctl --version 2>/dev/null | awk 'NR==1{print $1, $2}';;
+  *) if command -v openrc >/dev/null 2>&1; then openrc --version 2>/dev/null | awk 'NR==1{print "OpenRC", $3}'; else echo "$c"; fi;; esac''',
+    "Svc_Running": "command -v systemctl >/dev/null 2>&1 && systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | grep -c .",
+    "Svc_Failed": "command -v systemctl >/dev/null 2>&1 && systemctl list-units --type=service --state=failed --no-legend --plain 2>/dev/null | grep -c .",
+    "Svc_Targets": r'''command -v systemctl >/dev/null 2>&1 && { l=$(systemctl list-units --type=target --state=active --no-legend --plain 2>/dev/null | awk '{sub(/\.target$/,"",$1);print $1}')
+  if [ -n "$l" ]; then n=$(echo "$l" | wc -l); k=$(echo "$l" | grep -xE 'graphical|multi-user|network-online|rescue|emergency|sleep|suspend|hibernate' | paste -sd, - | sed 's/,/, /g'); echo "${k:+$k }($n active)"; fi; }''',
+    "Svc_Boot": r'''uptime -s 2>/dev/null || date -d "@$(awk '/^btime/{print $2}' /proc/stat)" '+%Y-%m-%d %H:%M:%S' 2>/dev/null''',
+    # --- Live meters (percent). Nothing here is cached.
+    "PCT_CPUFreq": r"""c=/sys/devices/system/cpu; paste -d' ' <(cat $c/cpu[0-9]*/cpufreq/scaling_cur_freq 2>/dev/null) <(cat $c/cpu[0-9]*/cpufreq/cpuinfo_max_freq 2>/dev/null) | awk '{a+=$1;m+=$2} END{if(m>0)printf "%d",a*100/m}'""",
+    "PCT_GPU": r'''r=""; command -v nvidia-smi >/dev/null 2>&1 && r=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+if [ -z "$r" ]; then for f in /sys/class/drm/card*/device/gpu_busy_percent; do [ -r "$f" ] && { r=$(cat "$f" 2>/dev/null); break; }; done; fi; echo "$r"''',
+    "PCT_NetDown": NETRATE + NETSPEED.replace("@DIR@", "rx").replace("@VAR@", "dr"),
+    "PCT_NetUp": NETRATE + NETSPEED.replace("@DIR@", "tx").replace("@VAR@", "dx")})
 
 # ------------------------------------------------------------------ system helpers
 def clean_env():
@@ -234,7 +370,7 @@ def value(key, snip):
             try:
                 r = subprocess.run(["bash", "-c", ". /etc/os-release 2>/dev/null; " + snip],
                                    capture_output=True, text=True, timeout=5, env=clean_env())
-                CACHE[key] = r.stdout.strip() or "n/a"
+                out = r.stdout.rstrip("\n"); CACHE[key] = out if out != "" else "n/a"   # same rule as the script: only newlines are trimmed
             except Exception: CACHE[key] = "n/a"
             STATE["dirty"] = True
         threading.Thread(target=run, daemon=True).start()
@@ -278,6 +414,7 @@ class Graph:
             if n["type"] == "output" and not g.meta.get("anim_v2"):
                 if n["params"].get("loops") == 2 and n["params"].get("fps") == 8: n["params"]["loops"], n["params"]["fps"] = 1, 12
                 g.meta["anim_v2"] = True
+            if n["type"] == "bar" and "metrics" not in n["params"]: n["params"]["metrics"] = [n["params"].pop("metric", "Memory")]   # pre-multi-meter projects
             for pr in SPEC[n["type"]][2]: n["params"].setdefault(pr.key, copy.deepcopy(pr.default))
         return g
 
@@ -298,6 +435,30 @@ def default_graph(name, preset):
     g.edges = [(i, oid) for i in ids]; return g
 
 # ------------------------------------------------------------------ compiler (graph -> runs)
+def wx_key(key, p): return "%s_%d" % (key, abs(hash((p["location"], p["units"]))) % 100000) if key.startswith("Wx_") else key
+
+def group_rows(p, O, adv, sep, funcs):
+    """One Info node set to a group (Clock, Storage...) -> only the ticked items, stacked (a line each) or inline (one line)."""
+    sel = [i for i in GROUPS[p["field"]] if i[0] in (p.get("items") or [])]
+    kc, vc, fg = p["key_color"], p["val_color"], O["fg"]; names = bool(p.get("names", True)); stacked = p.get("layout") != "inline"
+    mark = [R("◆ ", kc)] if adv else []; rows, inline, tail = [], [], []
+    def val(key):
+        k = wx_key(key, p); funcs[k] = weather_item(p["location"], p["units"], key) if key.startswith("Wx_") else SH[key]
+        return R("{{%s}}" % k, vc)
+    for key, _, short in sel:
+        if key == "Cal":                                          # month grid: 8 fixed lines, shown after the other items when inline
+            for i in range(8): funcs["Cal%d" % i] = SH["Cal%d" % i]; (rows if stacked else tail).append([R("{{Cal%d}}" % i, vc)])
+        elif stacked: rows.append(mark + ([R(san(short), kc, None, True), R(sep, fg)] if names else []) + [val(key)])
+        else: inline.append((short, key))
+    if inline:
+        runs = mark + [R(san(p["label"] or GROUP_LABEL[p["field"]]), kc, None, True), R(sep, fg)]
+        for n, (short, key) in enumerate(inline):
+            if n: runs.append(R(" · ", fg))
+            if names: runs.append(R(san(short) + " ", kc))
+            runs.append(val(key))
+        rows.append(runs)
+    return rows + tail
+
 # run = (text, fg, bg, bold); colors are "#rrggbb" or "aN" (terminal ANSI palette index)
 def R(t, fg=None, bg=None, b=False): return (t, fg, bg, b)
 def merge(runs):
@@ -494,20 +655,23 @@ def compile_graph(g, build=False):
                 rows.append([R("{{TitleU}}", O["fg"])])
         elif t == "info":
             f = p["field"]; ov = san(p.get("override") or "")
+            if f in GROUPS: rows += group_rows(p, O, adv, sep, funcs); continue
             if ov: val = R(ov, p["val_color"])                       # display-only name; nothing on the system is touched
             else:
                 if f == "Custom": key = "c%d" % abs(hash(p["command"])); funcs[key] = p["command"]
-                elif f == "Weather": key = "w%d" % abs(hash((p["location"], p["units"]))); funcs[key] = weather_snippet(p["location"], p["units"])
+                elif f == "Weather": key = "w%d" % abs(hash((p["location"], p["units"]))); funcs[key] = weather_item(p["location"], p["units"], "Weather")
                 else: key = f; funcs[key] = SH[f]
                 val = R("{{%s}}" % key, p["val_color"])
             lab = san(p["label"] or SHORT_LABELS.get(f, f))
             rows.append(([R("◆ ", p["key_color"])] if adv else []) + [R(lab, p["key_color"], None, True), R(sep, O["fg"]), val])
         elif t == "bar":
-            key = METRICS[p["metric"]]; funcs[key] = SH[key]; fc, ec = BARCH[p["style"]]; w = int(p["width"]); bn = "BAR%d" % len(bars)
-            bars[bn] = dict(key=key, w=w, fill=fc, empty=ec, ec=p["empty"],
-                            colors=[grad([p["c1"], p["c2"], p["c3"]], i / max(1, w - 1)) for i in range(w)])
-            rows.append([R(san(p["label"] or p["metric"]), p["key_color"], None, True), R(sep, O["fg"]),
-                         R("{{%s}}" % bn), R(" {{%s}}%%" % key, O["fg"])])
+            ms = [m for m in METRICS if m in (p.get("metrics") or [])]; fc, ec = BARCH[p["style"]]; w = int(p["width"])
+            for m in ms:                                              # every ticked meter gets its own bar line
+                key = METRICS[m]; funcs[key] = SH[key]; bn = "BAR%d" % len(bars)
+                bars[bn] = dict(key=key, w=w, fill=fc, empty=ec, ec=p["empty"],
+                                colors=[grad([p["c1"], p["c2"], p["c3"]], i / max(1, w - 1)) for i in range(w)])
+                rows.append([R(san(p["label"] if len(ms) == 1 and p["label"] else m), p["key_color"], None, True), R(sep, O["fg"]),
+                             R("{{%s}}" % bn), R(" {{%s}}%%" % key, O["fg"])])
         elif t == "divider":
             w = int(p["width"]); s_ = ((p["char"] or "─")[0]) * w; lab = san(p["label"])
             if lab: lab = " " + lab[: w - 4] + " "; i0 = (w - len(lab)) // 2; s_ = s_[:i0] + lab + s_[i0 + len(lab):]
@@ -516,7 +680,7 @@ def compile_graph(g, build=False):
             rows.append([])
             for r in range(int(p["rows"])): rows.append([R("   ", None, "a%d" % (i + 8 * r)) for i in range(8)])
         elif t == "text":
-            txt = san(p["text"]); row = []; pos = 0; ph = {k.lower(): k for k in list(SH) if not k.startswith("PCT_") and k != "TitleU"}
+            txt = san(p["text"]); row = []; pos = 0; ph = {k.lower(): k for k in list(SH) if not k.startswith(("PCT_", "Cal")) and k != "TitleU"}
             for m in re.finditer(r"\{(\w+)\}", txt):
                 k = ph.get(m[1].lower())
                 if not k: continue
@@ -735,6 +899,15 @@ def info_expr(row, bars):
         if st: parts.append("$'\\033[0m'")
     return "".join(parts)
 
+FS_CACHE = r"""FSC="${XDG_CACHE_HOME:-$HOME/.cache}/fetchstudio"; FSB=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+fs_cached(){ local f="$FSC/$1" ttl=$2 fn=$3 v
+  if [ -s "$f" ]; then
+    if [ "$ttl" = 0 ]; then [ "$(head -n1 "$f")" = "$FSB" ] && { tail -n +2 "$f"; return; }
+    elif [ -z "$(find "$f" -mmin +"$ttl" 2>/dev/null)" ]; then tail -n +2 "$f"; return; fi
+  fi
+  v=$($fn); [ -n "$v" ] && { mkdir -p "$FSC" 2>/dev/null; printf '%s\n%s\n' "$FSB" "$v" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null; }
+  printf '%s\n' "$v"; }"""
+
 BAR_FN = r"""bar(){ local p=${1:-0} w=$2 fc=$3 ec=$4 col=$5; local -n C=$6; local n i s=""
   [[ $p =~ ^[0-9]+$ ]] || p=0; n=$((p*w/100))
   for ((i=0;i<w;i++)); do if ((i<n)); then s+="${C[i]}$fc"; else s+="$col$ec"; fi; done
@@ -773,7 +946,12 @@ def gen_script(c, gdir=None, meta=None):
     O = c["O"]; frames = c["frames"]
     L = ["#!/usr/bin/env bash", "# Generated by Fetch Studio. Standalone - the app does not need to be running.",
          ". /etc/os-release 2>/dev/null", BAR_FN]
-    for k, sn in c["funcs"].items(): L.append("f_%s(){ local v; v=$(\n%s\n); echo \"${v:-n/a}\"; }" % (k, sn))   # empty result -> n/a (same as preview)
+    if any(k in CLASS for k in c["funcs"]): L.append(FS_CACHE)
+    for k, sn in c["funcs"].items():
+        if k in CLASS:                                                # slow identity data: cached on disk (0 = until reboot, N = minutes)
+            tag = "%s_%s" % (k, hashlib.md5(sn.encode()).hexdigest()[:6])   # snippet hash in the name: an app update never reads stale text
+            L.append("_r_%s(){\n%s\n}" % (k, sn)); L.append("f_%s(){ local v; v=$(fs_cached %s %d _r_%s); echo \"${v:-n/a}\"; }" % (k, tag, CLASS[k], k))
+        else: L.append("f_%s(){ local v; v=$(\n%s\n); echo \"${v:-n/a}\"; }" % (k, sn))   # live: empty result -> n/a (same as preview)
     for bn, b in c["bars"].items(): L.append("BARC_%s=(%s)" % (bn, " ".join("$'%s'" % sgr(col, None, False) for col in b["colors"])))
     L.append("INFO=()")
     for row in c["rows"]: L.append("INFO+=(%s)" % (info_expr(row, c["bars"]) or '""'))
@@ -817,7 +995,7 @@ def remove_hooks():
             t = strip_block(path.read_text())
             if kind == "fish" and not t.strip(): path.unlink()
             else: path.write_text(t)
-    (ACTIVE / "fetch.sh").unlink(missing_ok=True); shutil.rmtree(ACTIVE / "gfx", ignore_errors=True)
+    (ACTIVE / "fetch.sh").unlink(missing_ok=True); shutil.rmtree(ACTIVE / "gfx", ignore_errors=True); shutil.rmtree(CACHE_DIR, ignore_errors=True)
 
 # ------------------------------------------------------------------ terminal preview (cell-exact painter)
 class TermView(QWidget):
@@ -883,10 +1061,13 @@ class NodeItem(QGraphicsItem):
     def boundingRect(s): return QRectF(-8, -8, s.W + 16, s.H + 16)
     def summary(s):
         p, t = s.d["params"], s.d["type"]
+        if t == "info" and p.get("field") in GROUPS:
+            n = sum(1 for i in GROUPS[p["field"]] if i[0] in (p.get("items") or [])); return ("%s · %d item%s" % (p["field"], n, "" if n == 1 else "s"))[:24]
+        if t == "bar": return (", ".join(m for m in METRICS if m in (p.get("metrics") or [])) or "none selected")[:24]
         v = {"info": p.get("label") or FIELD_LABELS.get(p.get("field"), p.get("field")), "logo": p.get("source"), "title": "user@host",
              "output": f'{p.get("preset")} / {p.get("animation")}', "text": p.get("text"),
              "colors": f'{p.get("rows")} row(s)', "clogo": (p.get("data") or {}).get("name"),
-             "bar": p.get("metric"), "divider": p.get("label") or "divider"}.get(t, "")
+             "divider": p.get("label") or "divider"}.get(t, "")
         return str(v)[:24]
     def paint(s, p, o, w):
         title, col, _ = SPEC[s.d["type"]]; p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1097,7 +1278,9 @@ class PropPanel(QScrollArea):
         f.addRow(hdr(SPEC[d["type"]][0]))
         for par in SPEC[d["type"]][2]:
             if par.kind == "hidden" or (s.win.classic and par.fancy): continue
-            if par.when and d["params"].get(par.when[0]) != par.when[1]: continue
+            if par.when:
+                cur, need = d["params"].get(par.when[0]), par.when[1]
+                if cur not in need if isinstance(need, (tuple, list)) else cur != need: continue
             key, v = par.key, d["params"][par.key]
             if par.kind == "combo":
                 x = QComboBox(); x.addItems(par.opts); x.setCurrentText(str(v)); x.currentTextChanged.connect(lambda t, k=key: s.set(k, t))
@@ -1118,6 +1301,11 @@ class PropPanel(QScrollArea):
                 lst.currentItemChanged.connect(lambda it, _, k=key: it and s.set(k, it.data(Qt.ItemDataRole.UserRole)))
                 flt.textChanged.connect(lambda t, l=lst: [l.item(i).setHidden(t.lower() not in l.item(i).text().lower()) for i in range(l.count())])
                 xv.addWidget(flt); xv.addWidget(lst)
+            elif par.kind in ("multi", "groupitems"):
+                opts = [(m, m) for m in par.opts] if par.kind == "multi" else [(i[0], i[1]) for i in GROUPS.get(d["params"].get("field"), [])]
+                x = QWidget(); xv = QVBoxLayout(x); xv.setContentsMargins(0, 0, 0, 0); xv.setSpacing(2)
+                for val, lab in opts:
+                    cb = QCheckBox(lab); cb.setChecked(val in (v or [])); cb.toggled.connect(lambda on, k=key, val=val: s.toggle(k, val, on)); xv.addWidget(cb)
             elif par.kind == "action":
                 b = QPushButton(par.label); b.clicked.connect(lambda _, a=par.default: s.win.edit_in_designer(s.d) if a == "edit" else s.win.export_node(s.d))
                 f.addRow(b); continue
@@ -1127,8 +1315,16 @@ class PropPanel(QScrollArea):
         s.setWidget(w)
     def paint_btn(s, b, c):
         q = QColor(c); b.setStyleSheet("background:%s;color:%s" % (c, "#000" if q.lightness() > 128 else "#fff"))
+    def toggle(s, k, val, on):
+        cur = list(s.d["params"].get(k) or [])
+        if on and val not in cur: cur.append(val)
+        if not on and val in cur: cur.remove(val)
+        s.set(k, cur)
     def set(s, k, v):
         s.d["params"][k] = v
+        if k == "field" and v in GROUPS:                                       # first time on a group: start with a sensible handful ticked
+            cur = list(s.d["params"].get("items") or [])
+            if not any(i[0] in cur for i in GROUPS[v]): s.d["params"]["items"] = cur + GROUP_DEFAULT[v]
         if k == "theme" and v != "none": s.win.apply_theme(v); s.later_refresh()
         if k in ("field", "source"): s.later_refresh()          # show/hide Weather, Custom and image options
         s.win.node_changed(s.d)
