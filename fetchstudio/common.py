@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QListWidget, QListWidgetItem, QButtonGroup)
 
 APP = "Fetch Studio"
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 GH_REPO = "bobbycomet/Fetch-Studio"
 RELEASES_URL = "https://github.com/%s/releases" % GH_REPO
 UPDATER_URL = "https://github.com/bobbycomet/GriffinUpdater"
