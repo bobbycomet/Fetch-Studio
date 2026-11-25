@@ -81,6 +81,10 @@ jobs:
         run: |
           pyinstaller --noconfirm --onedir --name fetchstudio \
             --add-data "fetchstudio/helper:fetchstudio/helper" run.py
+          # AlmaLinux's libgcc_s.so.1 references a glibc 2.35 symbol, which breaks the 2.34 floor.
+          # Every Linux system has its own libgcc_s, so the bundled copy is dropped and the
+          # system one is used instead.
+          rm -f dist/fetchstudio/_internal/libgcc_s.so.1
 
       - name: Verify the bundle needs glibc 2.34 or older
         shell: bash
