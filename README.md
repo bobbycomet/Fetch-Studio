@@ -130,6 +130,7 @@ Everything is opt-in and lives in **Settings** (toolbar):
 1. **Set up helper…** asks for confirmation, then for your administrator password once (polkit). It installs a small root-owned helper that can do only two things: install `cal` and remove it again.
 2. Once the helper is installed, **Install cal** appears (if `cal` is missing), plus **Remove helper**, and **Uninstall cal** when it applies.
 3. **Uninstall cal** is only offered on Debian-family systems (where `cal` is its own package, `ncal`) and only if Fetch Studio installed it. On Fedora, Arch and openSUSE `cal` is part of `util-linux`, a core package that is never removed.
+4. If you do not see the install cal button, your system already has it installed.
 
 Without `pkexec`, Settings shows the command for your distribution instead. The helper is written by the app itself through `pkexec`, so nothing has to be unpacked or run by hand. Prefer the command line? `./FetchStudio-x86_64.AppImage --extract-helper` copies the files and `sudo sh install-helper.sh` installs them (`--uninstall` removes them).
 
